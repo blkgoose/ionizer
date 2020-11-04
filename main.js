@@ -38,8 +38,8 @@ function draw() {
 
     fetch("http://localhost:3000/command/1f9c75b0-6edc-36a4-a15b-279b8b531ca8/thruster",
       { method: "POST"
-      , headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
-      , body: JSON.stringify({activation: prevActivation+((mouseStartingPositionY-mouseY)*.1)})
+      , headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      , body: "activation=10"
       }
     )
 
