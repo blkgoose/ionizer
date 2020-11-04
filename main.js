@@ -9,6 +9,8 @@ prevMouseY=0
 prevActivation=0
 
 function draw() {
+  document.title=frameRate()
+
   fetch("http://localhost:3000/info/1f9c75b0-6edc-36a4-a15b-279b8b531ca8")
     .then(r => r.json())
     .then(r => {
