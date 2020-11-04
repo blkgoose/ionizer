@@ -1,6 +1,6 @@
 function setup() {
-  createCanvas(windowWidth, windowHeight, WEBGL);
-  frameRate(60);
+  createCanvas(windowWidth, windowHeight, WEBGL)
+  frameRate(60)
 }
 
 accelerating=false
