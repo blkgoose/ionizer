@@ -116,6 +116,12 @@ canvas {
   line-height: 0;
 }
 
+.gauges-column {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .engine-gauge {
   display: flex;
   flex-direction: column;
@@ -125,6 +131,10 @@ canvas {
   padding: 0.4rem 0.5rem;
   font-size: 0.65rem;
   min-width: 100px;
+}
+
+.fuel-fill {
+  background: #f5a623;
 }
 
 .engine-bar {
@@ -199,7 +209,8 @@ canvas {
 .modules-modal {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.85);
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.92);
   display: flex;
   align-items: center;
   justify-content: center;

@@ -59,4 +59,7 @@ export interface SystemMapEntry {
   diameter_m: number
 }
 
+/** Radar.scan's ActionResult::ScanResult — a Rust tuple, serialized as a 3-element JSON array. */
+export type RadarContactEntry = [entityId: string, position: FloatingOriginPosition, size: number]
+
 export class IonCommandError extends Error {}

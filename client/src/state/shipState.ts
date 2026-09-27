@@ -89,6 +89,21 @@ export function readEngineActivations(entity: ShipEntity, modules: ModuleRef[]):
     .map((m) => ({ moduleId: m.module_id, type: m.type, activation: readModuleActivation(entity, m.module_id) ?? 0 }))
 }
 
+// fuelcell.rs's FUEL_CAPACITY_KG — not part of the public API spec, mirrored here to turn
+// fuel_kg into a percentage for the gauge.
+export const FUEL_CAPACITY_KG = 50_000
+
+export interface FuelLevel {
+  moduleId: string
+  fuelKg: number
+}
+
+export function readFuelLevels(entity: ShipEntity, modules: ModuleRef[]): FuelLevel[] {
+  return modules
+    .filter((m) => m.type === "FuelCell")
+    .map((m) => ({ moduleId: m.module_id, fuelKg: readModuleField(entity, m.module_id, "fuel_kg") ?? 0 }))
+}
+
 export function readModules(entity: ShipEntity): ModuleRef[] {
   const modules = entity["modules"]
   if (modules && typeof modules === "object" && !Array.isArray(modules)) {
@@ -101,27 +116,35 @@ export function readModules(entity: ShipEntity): ModuleRef[] {
 
 type Listener = (entity: ShipEntity) => void
 
+// Matches the server's own physics tick rate (15 tps) — polling faster than the server actually
+// advances state just burns requests on repeats of the same tick.
+const POLL_INTERVAL_MS = 1000 / 15
+
 export class ShipStatePoller {
   private listeners = new Set<Listener>()
   private latest: ShipEntity | null = null
   private running = false
   private rafHandle: number | undefined
+  private lastPollAt = 0
 
   /**
-   * Driven by requestAnimationFrame instead of a fixed setInterval: fires a new GET every
-   * rendered frame (matching the display's refresh rate, ~60fps) as long as the previous one has
-   * already resolved — never overlapping requests, but never waiting longer than a frame either.
+   * Driven by requestAnimationFrame (so it's paused/throttled by the browser the same way
+   * rendering is) but self-throttled to POLL_INTERVAL_MS — never overlapping requests, and never
+   * firing faster than the server can actually produce new state.
    */
   start(): void {
     if (this.running) return
     this.running = true
 
-    const loop = () => {
+    const loop = (now: number) => {
       if (!this.running) return
       this.rafHandle = requestAnimationFrame(loop)
-      void this.poll()
+      if (now - this.lastPollAt >= POLL_INTERVAL_MS) {
+        this.lastPollAt = now
+        void this.poll()
+      }
     }
-    loop()
+    this.rafHandle = requestAnimationFrame(loop)
   }
 
   private inFlight = false

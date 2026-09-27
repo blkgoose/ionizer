@@ -1,5 +1,6 @@
 import * as THREE from "three"
 import type { OrientationQuaternion } from "../state/shipState"
+import { OrientationCage } from "./orientationCage"
 
 // Ship-local "forward" is +X (see FixedThruster: force applied along local (1,0,0), then rotated
 // by body orientation) but three.js's camera looks down its local -Z by default. This fixed
@@ -11,7 +12,7 @@ const CAMERA_TO_SHIP_SPACE = new THREE.Quaternion().setFromAxisAngle(new THREE.V
 export interface RadarContact {
   entityId: string
   position: [number, number, number]
-  mineable?: boolean
+  size: number // radar.rs's Radar.scan reports this as the contact's diameter, in meters
 }
 
 export class FlightScene {
@@ -19,6 +20,7 @@ export class FlightScene {
   readonly scene = new THREE.Scene()
   readonly camera: THREE.PerspectiveCamera
   private contacts = new Map<string, THREE.Object3D>()
+  private orientationCage: OrientationCage
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: false })
@@ -31,6 +33,8 @@ export class FlightScene {
     // Low fill light only — the real "sun" now comes from Starfield, driven by whatever
     // star the SystemMap scan actually finds nearby, so lighting reflects where we are.
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.15))
+
+    this.orientationCage = new OrientationCage(this.scene)
 
     window.addEventListener("resize", () => this.onResize())
   }
@@ -60,20 +64,27 @@ export class FlightScene {
     const seen = new Set<string>()
     for (const contact of contacts) {
       seen.add(contact.entityId)
-      let mesh = this.contacts.get(contact.entityId)
-      if (!mesh) {
-        const geometry = contact.mineable
-          ? new THREE.IcosahedronGeometry(50, 0)
-          : new THREE.BoxGeometry(40, 20, 60)
-        const material = new THREE.MeshLambertMaterial({
-          color: contact.mineable ? 0x555555 : 0xcc3333,
-          flatShading: true,
-        })
-        mesh = new THREE.Mesh(geometry, material)
-        this.scene.add(mesh)
-        this.contacts.set(contact.entityId, mesh)
+      let group = this.contacts.get(contact.entityId)
+      if (!group) {
+        // No orientation data comes back from Radar.scan (just position + size) — the white dot
+        // is pinned to a fixed local +X regardless, purely as a scale/reference marker, not a
+        // real heading indicator.
+        const radius = Math.max(1, contact.size / 2)
+        const body = new THREE.Mesh(
+          new THREE.SphereGeometry(radius, 12, 8),
+          new THREE.MeshLambertMaterial({ color: 0xcc3333, flatShading: true }),
+        )
+        const tip = new THREE.Mesh(
+          new THREE.SphereGeometry(Math.max(0.5, radius * 0.12), 6, 6),
+          new THREE.MeshBasicMaterial({ color: 0xffffff }),
+        )
+        tip.position.set(radius, 0, 0)
+        group = new THREE.Group()
+        group.add(body, tip)
+        this.scene.add(group)
+        this.contacts.set(contact.entityId, group)
       }
-      mesh.position.set(...contact.position)
+      group.position.set(...contact.position)
     }
 
     for (const [id, mesh] of this.contacts) {
@@ -85,6 +96,7 @@ export class FlightScene {
   }
 
   render(): void {
+    this.orientationCage.syncTo(this.camera.position)
     this.renderer.render(this.scene, this.camera)
   }
 }

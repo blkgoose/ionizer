@@ -34,6 +34,7 @@ const CARGO_TYPES = new Set(["Cargo"])
 // server still tags it "StarMap" (that build predates the rename in system_map.rs) — accept
 // both until the server gets rebuilt/restarted with the current source.
 export const SYSTEM_MAP_TYPES = new Set(["SystemMap", "StarMap"])
+export const RADAR_TYPES = new Set(["Radar"])
 
 export function tabForModuleType(type: string): ModuleTab | null {
   if (CARGO_TYPES.has(type)) return "cargo"
