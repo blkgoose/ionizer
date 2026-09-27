@@ -8,6 +8,7 @@ import { Minimap } from "./ui/minimap"
 import { SystemPanel } from "./ui/systemPanel"
 import { OrientationPanel } from "./ui/orientationPanel"
 import { DirectionMarkers } from "./ui/directionMarkers"
+import { FpsCounter } from "./ui/fpsCounter"
 import { FlightScene } from "./scene/scene"
 import { Starfield } from "./scene/starfield"
 import { IntelligentPropulsion } from "./scene/propulsion"
@@ -39,6 +40,7 @@ function startGame(): void {
   const systemPanel = new SystemPanel(app)
   const orientationPanel = new OrientationPanel(app)
   const directionMarkers = new DirectionMarkers(app)
+  const fpsCounter = new FpsCounter(app)
   const propulsion = new IntelligentPropulsion()
 
   systemMapPoller.start()
@@ -72,6 +74,7 @@ function startGame(): void {
 
   function animate(): void {
     scene.render()
+    fpsCounter.tick()
     requestAnimationFrame(animate)
   }
   animate()

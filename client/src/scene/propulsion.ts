@@ -123,9 +123,11 @@ export class IntelligentPropulsion {
   async tick(): Promise<void> {
     const shiftHeld = this.keyDown.shift
 
-    const yaw = shiftHeld ? 0 : (this.keyDown.d ? 100 : 0) - (this.keyDown.a ? 100 : 0)
-    const roll = shiftHeld ? (this.keyDown.d ? 100 : 0) - (this.keyDown.a ? 100 : 0) : 0
-    const pitch = shiftHeld ? 0 : (this.keyDown.s ? 100 : 0) - (this.keyDown.w ? 100 : 0)
+    // A/D and W/S are swapped from what you'd naively expect (A/D drive pitch, W/S drive yaw) —
+    // per the operator's own correction, not a mistake.
+    const yaw = shiftHeld ? 0 : (this.keyDown.w ? 100 : 0) - (this.keyDown.s ? 100 : 0)
+    const pitch = shiftHeld ? 0 : (this.keyDown.a ? 100 : 0) - (this.keyDown.d ? 100 : 0)
+    const roll = shiftHeld ? (this.keyDown.a ? 100 : 0) - (this.keyDown.d ? 100 : 0) : 0
     const steeringQ = this.keyDown.q ? 100 : 0
     const steeringE = this.keyDown.e ? 100 : 0
 

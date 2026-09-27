@@ -152,6 +152,11 @@ export class ModulesModal {
       if (healthEl) healthEl.textContent = `${manifest.health_pct.toFixed(0)}%`
 
       for (const v of manifest.variables) {
+        const cargoEl = detailEl.querySelector<HTMLElement>(`[data-cargo-list="${v.name}"]`)
+        if (cargoEl) {
+          cargoEl.innerHTML = formatCargoSlots(v.value)
+          continue
+        }
         const valueEl = detailEl.querySelector<HTMLElement>(`[data-variable-value="${v.name}"]`)
         if (valueEl) {
           valueEl.textContent = formatVariableValue(v)
@@ -189,6 +194,26 @@ export class ModulesModal {
   }
 }
 
+// Cargo.slots serializes each Item as an externally-tagged Rust enum: {"Unit":["Iron",5]},
+// {"Weight":["Iron",12.5]}, or {"Volume":["Iron",0.8]} — variant name plus a [item, amount] tuple.
+function formatCargoItem(item: unknown): string {
+  if (item && typeof item === "object") {
+    const [variant, payload] = Object.entries(item as Record<string, unknown>)[0] ?? []
+    if (Array.isArray(payload) && payload.length === 2) {
+      const [name, amount] = payload as [string, number]
+      const unit = variant === "Unit" ? "unità" : variant === "Weight" ? "kg" : variant === "Volume" ? "m³" : ""
+      const formattedAmount = variant === "Unit" ? amount : Number(amount).toFixed(2)
+      return `<li>${name}: ${formattedAmount} ${unit}</li>`
+    }
+  }
+  return `<li>${JSON.stringify(item)}</li>`
+}
+
+function formatCargoSlots(slots: unknown): string {
+  if (!Array.isArray(slots) || slots.length === 0) return `<p class="field-desc">Vuoto</p>`
+  return `<ul class="cargo-list">${slots.map(formatCargoItem).join("")}</ul>`
+}
+
 function formatVariableValue(v: VariableManifest): string {
   if (v.value === null || v.value === undefined) return "-"
   if (typeof v.value === "number" && isSecondsField(v.name, v.description)) {
@@ -200,6 +225,12 @@ function formatVariableValue(v: VariableManifest): string {
 function renderManifest(manifest: ModuleManifest): string {
   const variableRows = manifest.variables
     .map((v) => {
+      if (v.type === "array") {
+        return `<div class="manifest-row manifest-row-cargo">
+          <label>${v.name} <span class="field-desc">${v.description}</span></label>
+          <div data-cargo-list="${v.name}">${formatCargoSlots(v.value)}</div>
+        </div>`
+      }
       const control = v.mutable
         ? `<input data-variable="${v.name}" value="${v.value ?? ""}" />`
         : `<span class="field-value" data-variable-value="${v.name}">${formatVariableValue(v)}</span>`

@@ -1,8 +1,6 @@
 import { ionClient } from "../api/client"
 import type { FloatingOriginPosition, ShipEntity, Vector3 } from "../api/types"
 
-const POLL_INTERVAL_MS = 150
-
 // floating_origin.rs ORIGIN_SECTOR_SIZE_M — not part of the public API spec, mirrored here
 // because relative distances between the ship and system-map entries (up to 1 ly apart) span
 // many sectors and can't be computed correctly from `shift` alone.
@@ -105,28 +103,48 @@ type Listener = (entity: ShipEntity) => void
 
 export class ShipStatePoller {
   private listeners = new Set<Listener>()
-  private timer: number | undefined
   private latest: ShipEntity | null = null
+  private running = false
+  private rafHandle: number | undefined
 
+  /**
+   * Driven by requestAnimationFrame instead of a fixed setInterval: fires a new GET every
+   * rendered frame (matching the display's refresh rate, ~60fps) as long as the previous one has
+   * already resolved — never overlapping requests, but never waiting longer than a frame either.
+   */
   start(): void {
-    if (this.timer !== undefined) return
-    const tick = async () => {
-      try {
-        const entity = await ionClient.get()
-        this.latest = entity
-        this.listeners.forEach((listener) => listener(entity))
-      } catch (err) {
-        console.error("GET poll failed", err)
-      }
+    if (this.running) return
+    this.running = true
+
+    const loop = () => {
+      if (!this.running) return
+      this.rafHandle = requestAnimationFrame(loop)
+      void this.poll()
     }
-    void tick()
-    this.timer = window.setInterval(tick, POLL_INTERVAL_MS)
+    loop()
+  }
+
+  private inFlight = false
+
+  private async poll(): Promise<void> {
+    if (this.inFlight) return
+    this.inFlight = true
+    try {
+      const entity = await ionClient.get()
+      this.latest = entity
+      this.listeners.forEach((listener) => listener(entity))
+    } catch (err) {
+      console.error("GET poll failed", err)
+    } finally {
+      this.inFlight = false
+    }
   }
 
   stop(): void {
-    if (this.timer !== undefined) {
-      window.clearInterval(this.timer)
-      this.timer = undefined
+    this.running = false
+    if (this.rafHandle !== undefined) {
+      cancelAnimationFrame(this.rafHandle)
+      this.rafHandle = undefined
     }
   }
 

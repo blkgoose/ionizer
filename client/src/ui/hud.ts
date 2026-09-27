@@ -3,11 +3,37 @@ import { readAngularVelocity, readPosition, readVelocity } from "../state/shipSt
 
 const RAD_TO_DEG = 180 / Math.PI
 
+interface StatusLine {
+  root: HTMLDivElement
+  x: HTMLSpanElement
+  y: HTMLSpanElement
+  z: HTMLSpanElement
+}
+
+// Numbers rebuilt via textContent (never innerHTML) into fixed-width spans (see .hud-num in
+// style.css): position/velocity/acceleration change every frame, and re-laying-out variable-width
+// text each time made the whole panel visibly jitter as digits/sign changed.
+function buildLine(label: string, unit: string): StatusLine {
+  const root = document.createElement("div")
+  const x = document.createElement("span")
+  const y = document.createElement("span")
+  const z = document.createElement("span")
+  x.className = y.className = z.className = "hud-num"
+  root.append(`${label} `, x, " / ", y, " / ", z, unit ? ` ${unit}` : "")
+  return { root, x, y, z }
+}
+
+function setLine(line: StatusLine, x: number, y: number, z: number): void {
+  line.x.textContent = x.toFixed(4)
+  line.y.textContent = y.toFixed(4)
+  line.z.textContent = z.toFixed(4)
+}
+
 export class Hud {
-  private positionEl: HTMLDivElement
-  private velocityEl: HTMLDivElement
-  private accelerationEl: HTMLDivElement
-  private angularVelocityEl: HTMLDivElement
+  private positionLine: StatusLine
+  private velocityLine: StatusLine
+  private accelerationLine: StatusLine
+  private angularVelocityLine: StatusLine
   private lastVelocity: Vector3 | null = null
   private lastTimestamp: number | null = null
 
@@ -18,11 +44,16 @@ export class Hud {
     const statusPanel = document.createElement("div")
     statusPanel.className = "hud-panel hud-status"
 
-    this.positionEl = document.createElement("div")
-    this.velocityEl = document.createElement("div")
-    this.accelerationEl = document.createElement("div")
-    this.angularVelocityEl = document.createElement("div")
-    statusPanel.append(this.positionEl, this.velocityEl, this.accelerationEl, this.angularVelocityEl)
+    this.positionLine = buildLine("POS", "")
+    this.velocityLine = buildLine("VEL", "m/s")
+    this.accelerationLine = buildLine("ACC", "m/s²")
+    this.angularVelocityLine = buildLine("ANG", "deg/s")
+    statusPanel.append(
+      this.positionLine.root,
+      this.velocityLine.root,
+      this.accelerationLine.root,
+      this.angularVelocityLine.root,
+    )
     el.appendChild(statusPanel)
 
     const hint = document.createElement("div")
@@ -42,13 +73,13 @@ export class Hud {
 
   update(entity: ShipEntity): void {
     const [x, y, z] = readPosition(entity)
-    this.positionEl.textContent = `POS ${x.toFixed(4)} / ${y.toFixed(4)} / ${z.toFixed(4)}`
+    setLine(this.positionLine, x, y, z)
 
     const velocity = readVelocity(entity)
     const now = performance.now()
     if (!velocity) return
 
-    this.velocityEl.textContent = `VEL ${velocity.x.toFixed(4)} / ${velocity.y.toFixed(4)} / ${velocity.z.toFixed(4)} m/s`
+    setLine(this.velocityLine, velocity.x, velocity.y, velocity.z)
 
     if (this.lastVelocity && this.lastTimestamp !== null) {
       const dt = (now - this.lastTimestamp) / 1000
@@ -56,7 +87,7 @@ export class Hud {
         const ax = (velocity.x - this.lastVelocity.x) / dt
         const ay = (velocity.y - this.lastVelocity.y) / dt
         const az = (velocity.z - this.lastVelocity.z) / dt
-        this.accelerationEl.textContent = `ACC ${ax.toFixed(4)} / ${ay.toFixed(4)} / ${az.toFixed(4)} m/s²`
+        setLine(this.accelerationLine, ax, ay, az)
       }
     }
 
@@ -65,10 +96,12 @@ export class Hud {
 
     const angularVelocity = readAngularVelocity(entity)
     if (angularVelocity) {
-      const wx = angularVelocity.x * RAD_TO_DEG
-      const wy = angularVelocity.y * RAD_TO_DEG
-      const wz = angularVelocity.z * RAD_TO_DEG
-      this.angularVelocityEl.textContent = `ANG ${wx.toFixed(4)} / ${wy.toFixed(4)} / ${wz.toFixed(4)} deg/s`
+      setLine(
+        this.angularVelocityLine,
+        angularVelocity.x * RAD_TO_DEG,
+        angularVelocity.y * RAD_TO_DEG,
+        angularVelocity.z * RAD_TO_DEG,
+      )
     }
   }
 }

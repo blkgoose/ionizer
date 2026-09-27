@@ -63,6 +63,17 @@ canvas {
   gap: 0.15rem;
 }
 
+.hud-num {
+  display: inline-block;
+  min-width: 10ch;
+  text-align: right;
+}
+
+.hud-fps {
+  top: 1rem;
+  right: 6rem;
+}
+
 .hud-hint {
   bottom: 1rem;
   right: 1rem;
@@ -309,6 +320,23 @@ canvas {
 
 .manifest-row input {
   width: 140px;
+}
+
+.manifest-row-cargo {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.cargo-list {
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cargo-list li {
+  padding: 0.15rem 0;
+  font-size: 0.8rem;
+  color: #6cf;
 }
 
 .action-controls {
