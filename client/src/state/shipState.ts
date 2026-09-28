@@ -58,6 +58,12 @@ export function readShipSize(entity: ShipEntity): number | null {
   return typeof size === "number" ? size : null
 }
 
+/** body.mass — entity.rs's mass_and_size sums dry module mass plus whatever fuel is left, so this drifts down as thrusters burn fuel. */
+export function readShipMass(entity: ShipEntity): number | null {
+  const mass = (entity as any)?.body?.mass
+  return typeof mass === "number" ? mass : null
+}
+
 export function readVelocity(entity: ShipEntity): Vector3 | null {
   const v = (entity as any)?.body?.position?.velocity
   if (v && typeof v.x === "number") return v as Vector3

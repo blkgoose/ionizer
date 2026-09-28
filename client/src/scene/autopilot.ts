@@ -7,10 +7,13 @@ import {
   readAngularVelocity,
   readFloatingPosition,
   readOrientation,
+  readShipMass,
+  readShipSize,
   readVelocity,
   relativeVector,
   type ModuleRef,
 } from "../state/shipState"
+import { calibrationMatches, loadAutopilotCalibration, saveAutopilotCalibration } from "../state/autopilotCalibration"
 
 const RAD_TO_DEG = 180 / Math.PI
 const MAX_CALIBRATION_ATTEMPTS = 2
@@ -58,6 +61,9 @@ export class Autopilot {
   private gains: AxisGains | null = null
   private phase: AutopilotPhase = "idle"
   private rcsIds = ""
+  private sizeM: number | null = null
+  private massKg: number | null = null
+  private cachedCalibration = loadAutopilotCalibration()
   private lastSampleAtMs = 0
   private avgTickS = 0.066
   private avgSetRttS = 0.05
@@ -69,11 +75,29 @@ export class Autopilot {
 
   setModules(modules: ModuleRef[], entity: ShipEntity | null): void {
     this.thrusters = classifyThrusters(entity, modules)
+    this.sizeM = entity ? readShipSize(entity) : null
+    this.massKg = entity ? readShipMass(entity) : null
     const rcsIds = this.thrusters.rcs.map((t) => t.module_id).join(",")
     if (rcsIds !== this.rcsIds) {
       this.rcsIds = rcsIds
-      if (this.engaged) this.startCalibration()
+      if (this.engaged && !this.tryUseCachedCalibration()) this.startCalibration()
     }
+  }
+
+  /** Reuses a previously-measured calibration instead of re-running the doublet, if one matches the ship's current RCS loadout/size/mass (see autopilotCalibration.ts). */
+  private tryUseCachedCalibration(): boolean {
+    if (this.sizeM === null || this.massKg === null) return false
+    const cached = this.cachedCalibration
+    if (!cached || !calibrationMatches(cached, this.rcsIds, this.sizeM, this.massKg)) return false
+    this.gains = cached.gains
+    this.phase = "cruise"
+    return true
+  }
+
+  private persistCalibration(): void {
+    if (!this.gains || this.sizeM === null || this.massKg === null) return
+    this.cachedCalibration = { rcsIds: this.rcsIds, sizeM: this.sizeM, massKg: this.massKg, gains: this.gains }
+    saveAutopilotCalibration(this.cachedCalibration)
   }
 
   private startCalibration(): void {
@@ -89,7 +113,7 @@ export class Autopilot {
     this.sent.clear()
     this.zeroPending = false
     this.calibrationAttempts = 0
-    this.startCalibration()
+    if (!this.tryUseCachedCalibration()) this.startCalibration()
   }
 
   get engaged(): boolean {
@@ -256,6 +280,7 @@ export class Autopilot {
         const gains = this.calibrator.gains()
         if (gains.yaw !== null && gains.pitch !== null) {
           this.gains = gains
+          this.persistCalibration()
         } else if (this.calibrationAttempts < MAX_CALIBRATION_ATTEMPTS) {
           this.startCalibration()
         } else {
