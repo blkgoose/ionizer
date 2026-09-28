@@ -16,7 +16,12 @@ export class ContextMenu {
     window.addEventListener("click", () => this.hide())
   }
 
-  show(clientX: number, clientY: number, title: string, actions: ContextMenuAction[]): void {
+  /**
+   * `centered`, when true, ignores `clientX`/`clientY` and places the menu at the screen's
+   * center instead — used when the trigger point (e.g. a row in the bottom-of-screen system
+   * panel) is too close to a screen edge for the menu to fit below/beside it.
+   */
+  show(clientX: number, clientY: number, title: string, actions: ContextMenuAction[], centered = false): void {
     this.el.innerHTML = ""
     const heading = document.createElement("div")
     heading.className = "context-menu-title"
@@ -34,8 +39,11 @@ export class ContextMenu {
       this.el.appendChild(item)
     }
 
-    this.el.style.left = `${clientX}px`
-    this.el.style.top = `${clientY}px`
+    this.el.classList.toggle("context-menu-centered", centered)
+    if (!centered) {
+      this.el.style.left = `${clientX}px`
+      this.el.style.top = `${clientY}px`
+    }
     this.el.style.display = "flex"
   }
 

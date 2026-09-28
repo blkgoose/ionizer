@@ -15,6 +15,43 @@ export interface RadarContact {
   size: number // radar.rs's Radar.scan reports this as the contact's diameter, in meters
 }
 
+/**
+ * Ships are spheres at heart (that's their actual collision/size envelope), which is hard to
+ * judge from a heading cone alone — so every ship (ours and contacts) renders as a faint,
+ * translucent sphere at its true radius, with a solid cone inside pointing along local forward
+ * (+X) as a heading indicator. `radius` is in whatever unit space the caller scales/positions in
+ * (real meters for radar contacts; a unit sphere scaled up to size for the own-ship mesh).
+ */
+function buildShipVisual(radius: number, color: number): THREE.Group {
+  const hull = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 16, 12),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.12, depthWrite: false }),
+  )
+  // Base radius == sphere radius, height == sphere radius: after the rotation+offset below this
+  // is the largest cone (apex at the sphere's front pole, base rim on its equator) that stays
+  // fully inside the hull at every point along its length — a bigger base or taller cone would
+  // poke its base corners out through the surface.
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(radius, radius, 8),
+    new THREE.MeshLambertMaterial({ color, flatShading: true }),
+  )
+  cone.rotation.z = -Math.PI / 2
+  cone.position.x = radius / 2
+  // Rear half: a solid hemisphere filling the other side of the hull (from the equator back to
+  // the rear pole), so cone + hemisphere together fill the whole sphere silhouette like a bullet.
+  // SphereGeometry's theta range (0..PI/2) gives a dome from its pole down to the equator, with
+  // the equator plane sitting at the mesh's own local origin — rotating +90° about Z (opposite
+  // sign from the cone above) swings that pole to -X, matching the cone's flat base at x=0.
+  const rear = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+    new THREE.MeshLambertMaterial({ color, flatShading: true }),
+  )
+  rear.rotation.z = Math.PI / 2
+  const group = new THREE.Group()
+  group.add(hull, cone, rear)
+  return group
+}
+
 export class FlightScene {
   readonly renderer: THREE.WebGLRenderer
   readonly scene = new THREE.Scene()
@@ -47,17 +84,10 @@ export class FlightScene {
   }
 
   private buildOwnShipMesh(): THREE.Object3D {
-    // Unit cone (diameter 1, height 1) pointing along +Y by default; rotated so it points along
-    // ship-local forward (+X), then uniformly scaled to the real size reported by GET (see
-    // setOwnShipSize) so it's not just an arbitrarily-sized placeholder.
-    const body = new THREE.Mesh(
-      new THREE.ConeGeometry(0.5, 1, 8),
-      new THREE.MeshLambertMaterial({ color: 0x66ccff, flatShading: true }),
-    )
-    body.rotation.z = -Math.PI / 2
-    const group = new THREE.Group()
-    group.add(body)
-    return group
+    // Unit sphere+cone (radius 0.5, i.e. diameter 1) pointing along ship-local forward (+X);
+    // uniformly scaled to the real size reported by GET (see setOwnShipSize) so it's not just an
+    // arbitrarily-sized placeholder.
+    return buildShipVisual(0.5, 0x66ccff)
   }
 
   setOwnShipVisible(visible: boolean): void {
@@ -101,19 +131,11 @@ export class FlightScene {
       seen.add(contact.entityId)
       let group = this.contacts.get(contact.entityId)
       if (!group) {
-        // No orientation data comes back from Radar.scan (just position + size) — the white dot
-        // is pinned to a fixed local +X regardless, purely as a scale/reference marker, not a
-        // real heading indicator.
+        // No orientation data comes back from Radar.scan (just position + size) — the forward
+        // cone is pinned to a fixed local +X regardless, purely as a scale/reference marker, not
+        // a real heading indicator.
         const radius = Math.max(1, contact.size / 2)
-        const body = new THREE.Mesh(
-          new THREE.SphereGeometry(radius, 12, 8),
-          new THREE.MeshLambertMaterial({ color: 0xcc3333, flatShading: true }),
-        )
-        const tip = new THREE.Mesh(
-          new THREE.SphereGeometry(Math.max(0.5, radius * 0.12), 6, 6),
-          new THREE.MeshBasicMaterial({ color: 0xffffff }),
-        )
-        tip.position.set(radius, 0, 0)
+        const visual = buildShipVisual(radius, 0xcc3333)
         // Invisible, oversized hit-target: the visual body can be too small on screen (especially
         // at tactical-camera zoom) to reliably click — material.visible = false skips rendering
         // but three.js's raycaster still tests the geometry.
@@ -122,7 +144,7 @@ export class FlightScene {
           new THREE.MeshBasicMaterial({ visible: false }),
         )
         group = new THREE.Group()
-        group.add(body, tip, hitTarget)
+        group.add(visual, hitTarget)
         this.scene.add(group)
         this.contacts.set(contact.entityId, group)
       }

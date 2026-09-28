@@ -34,6 +34,7 @@ import {
 import { systemMapPoller } from "./state/systemMap"
 import { radarPoller } from "./state/radar"
 import type { FloatingOriginPosition } from "./api/types"
+import { loadAutopilotGoal, saveAutopilotGoal, type AutopilotGoal } from "./state/autopilotGoal"
 
 const PROPULSION_TICK_MS = 100
 const RENDER_INTERVAL_MS = 1000 / 15
@@ -54,17 +55,15 @@ function startGame(): void {
       ionClient.logout()
       location.reload()
     },
-    () => {
-      propulsion.enabled = false
-      autopilot.setModules(currentModules, shipStatePoller.getLatest())
-      autopilot.engageStop()
-    },
+    () => engageAutopilot({ kind: "stop" }),
   )
   const modal = new ModulesModal(app)
   const minimap = new Minimap(app)
   const systemPanel = new SystemPanel(app, (entryIndex, kind, clientX, clientY) => {
     const position = systemMapPoller.getLatest()[entryIndex]?.position ?? null
-    showBodyMenu(clientX, clientY, entryIndex, kind, position)
+    // Rows near the panel's bottom edge would push a click-positioned menu off the bottom of
+    // the viewport, so this trigger always centers the menu instead of anchoring it to the row.
+    showBodyMenu(clientX, clientY, entryIndex, kind, position, true)
   })
   const radarPanel = new RadarPanel(app)
   const orientationPanel = new OrientationPanel(app)
@@ -84,6 +83,7 @@ function startGame(): void {
   function disengageAutopilot(): void {
     autopilot.disengage()
     propulsion.enabled = !tactical
+    saveAutopilotGoal(null)
   }
 
   const autopilotStatus = new AutopilotStatus(app, disengageAutopilot)
@@ -94,12 +94,12 @@ function startGame(): void {
 
   if (tacticalCamera) {
     const raycaster = new THREE.Raycaster()
-    // Bright wireframe sphere sized to whatever was actually hit (the invisible, deliberately
-    // oversized hit-target — see scene.ts/starfield.ts) so hovering shows exactly where a click
-    // will register, since stars/planets are tiny, hard-to-hit skybox dots otherwise.
+    // Faint, sparse wireframe sphere marking whatever was actually hit, so hovering shows where
+    // a click will register (stars/planets/ships are tiny, hard-to-hit skybox dots otherwise).
+    // Coarse segment count and low opacity keep it a subtle cue rather than a glowing cage.
     const hoverHighlight = new THREE.Mesh(
-      new THREE.SphereGeometry(1, 16, 10),
-      new THREE.MeshBasicMaterial({ color: 0xffee66, wireframe: true, transparent: true, opacity: 0.7 }),
+      new THREE.SphereGeometry(1, 8, 5),
+      new THREE.MeshBasicMaterial({ color: 0x7ac4dd, wireframe: true, transparent: true, opacity: 0.18 }),
     )
     hoverHighlight.visible = false
     scene.scene.add(hoverHighlight)
@@ -156,7 +156,10 @@ function startGame(): void {
       if (hovered) {
         const sphere = new THREE.Box3().setFromObject(hovered.object).getBoundingSphere(new THREE.Sphere())
         hoverHighlight.position.copy(sphere.center)
-        hoverHighlight.scale.setScalar(sphere.radius)
+        // The hit-target meshes (scene.ts/starfield.ts) are deliberately oversized well beyond
+        // the visible body to make clicking easier — shrink the highlight back down so it hugs
+        // the object instead of ballooning out to that oversized hit-target's radius.
+        hoverHighlight.scale.setScalar(sphere.radius * 0.6)
         hoverHighlight.visible = true
         scene.renderer.domElement.style.cursor = "pointer"
       } else {
@@ -166,16 +169,50 @@ function startGame(): void {
     })
   }
 
-  function engageAutopilot(
-    getTarget: (nowMs: number) => FloatingOriginPosition | null,
-    arrivalRadius: number,
-    targetRadiusM: number,
-    label: string,
-  ): void {
+  /** Builds the live getTargetPosition closure for a persisted goal — the inverse of what each context-menu action below stores. */
+  function resolveGoal(
+    goal: Exclude<AutopilotGoal, { kind: "stop" }>,
+  ): { getTarget: (nowMs: number) => FloatingOriginPosition | null; arrivalRadius: number; targetRadiusM: number; label: string } {
+    switch (goal.kind) {
+      case "shipApproach":
+        return {
+          getTarget: () => radarPoller.getLatest().find(([id]) => id === goal.entityId)?.[1] ?? null,
+          arrivalRadius: goal.arrivalRadius,
+          targetRadiusM: goal.targetRadiusM,
+          label: goal.label,
+        }
+      case "bodyApproach":
+        return {
+          getTarget: () => systemMapPoller.getLatest()[goal.entryIndex]?.position ?? null,
+          arrivalRadius: goal.arrivalRadius,
+          targetRadiusM: goal.targetRadiusM,
+          label: goal.label,
+        }
+      case "orbit":
+        return {
+          getTarget: orbitTargetPosition(goal.center, goal.radiusM, goal.startedAtMs),
+          arrivalRadius: goal.arrivalRadius,
+          targetRadiusM: 0,
+          label: goal.label,
+        }
+    }
+  }
+
+  function engageAutopilot(goal: AutopilotGoal): void {
     propulsion.enabled = false
     autopilot.setModules(currentModules, shipStatePoller.getLatest())
-    autopilot.engage(getTarget, arrivalRadius, targetRadiusM, label)
+    if (goal.kind === "stop") {
+      autopilot.engageStop()
+    } else {
+      const { getTarget, arrivalRadius, targetRadiusM, label } = resolveGoal(goal)
+      autopilot.engage(getTarget, arrivalRadius, targetRadiusM, label)
+    }
+    saveAutopilotGoal(goal)
   }
+
+  // Resumed once the relevant live position becomes available (radar/system-map poll not necessarily
+  // caught up yet on the very first ship-state tick) — see the shipStatePoller.subscribe callback below.
+  let pendingResume: AutopilotGoal | null = loadAutopilotGoal()
 
   function showShipMenu(x: number, y: number, entityId: string): void {
     const turretModule = currentModules.find((m) => m.type === "Turret")
@@ -195,45 +232,60 @@ function startGame(): void {
       {
         label: "Approach",
         onSelect: () => {
-          engageAutopilot(
-            () => radarPoller.getLatest().find(([id]) => id === entityId)?.[1] ?? null,
-            ARRIVAL_RADIUS_M,
-            contactRadiusM,
-            `Approach ${entityId.slice(0, 8)}`,
-          )
+          engageAutopilot({
+            kind: "shipApproach",
+            entityId,
+            arrivalRadius: ARRIVAL_RADIUS_M,
+            targetRadiusM: contactRadiusM,
+            label: `Approach ${entityId.slice(0, 8)}`,
+          })
         },
       },
     ])
   }
 
-  function showBodyMenu(x: number, y: number, entryIndex: number, kind: string, position: FloatingOriginPosition | null): void {
+  function showBodyMenu(x: number, y: number, entryIndex: number, kind: string, position: FloatingOriginPosition | null, centered = false): void {
     if (!position) return
     // SystemMapEntry's diameter_m is a diameter, not a radius.
     const bodyRadiusM = (systemMapPoller.getLatest()[entryIndex]?.diameter_m ?? 0) / 2
     const orbitRadius = Math.max(bodyRadiusM + 200, ARRIVAL_RADIUS_M)
     const shipPosition = readFloatingPosition(shipStatePoller.getLatest() ?? {})
     const distanceLabel = shipPosition ? ` — ${formatDistance(Math.hypot(...relativeVector(shipPosition, position)))}` : ""
-    contextMenu.show(x, y, `${kind}${distanceLabel}`, [
-      {
-        label: "Orbit",
-        onSelect: () => {
-          // The orbit chase point already sits `orbitRadius` out from the body's center, so the
-          // autopilot should treat it as a bare point (radius 0), not double-count the body's own radius.
-          engageAutopilot(orbitTargetPosition(position, orbitRadius, Date.now()), ARRIVAL_RADIUS_M, 0, `Orbit ${kind}`)
+    contextMenu.show(
+      x,
+      y,
+      `${kind}${distanceLabel}`,
+      [
+        {
+          label: "Orbit",
+          onSelect: () => {
+            // The orbit chase point already sits `orbitRadius` out from the body's center, so the
+            // autopilot should treat it as a bare point (radius 0), not double-count the body's own radius.
+            engageAutopilot({
+              kind: "orbit",
+              center: position,
+              radiusM: orbitRadius,
+              arrivalRadius: ARRIVAL_RADIUS_M,
+              startedAtMs: Date.now(),
+              label: `Orbit ${kind}`,
+            })
+          },
         },
-      },
-      {
-        label: "Approach",
-        onSelect: () => {
-          engageAutopilot(
-            () => systemMapPoller.getLatest()[entryIndex]?.position ?? null,
-            ARRIVAL_RADIUS_M,
-            bodyRadiusM,
-            `Approach ${kind}`,
-          )
+        {
+          label: "Approach",
+          onSelect: () => {
+            engageAutopilot({
+              kind: "bodyApproach",
+              entryIndex,
+              arrivalRadius: ARRIVAL_RADIUS_M,
+              targetRadiusM: bodyRadiusM,
+              label: `Approach ${kind}`,
+            })
+          },
         },
-      },
-    ])
+      ],
+      centered,
+    )
   }
 
   systemMapPoller.start()
@@ -257,8 +309,23 @@ function startGame(): void {
     propulsion.setModules(modules, entity)
     propulsion.syncFromEntity(entity)
     autopilot.setModules(modules, entity)
+
+    if (pendingResume) {
+      const goal = pendingResume
+      // "stop" needs no live position; other kinds wait for their poller's first data so
+      // resolveGoal's getTarget doesn't see null and immediately auto-disengage (autopilot.tick()
+      // treats a null target as "target lost").
+      if (goal.kind === "stop" || resolveGoal(goal).getTarget(Date.now()) !== null) {
+        pendingResume = null
+        engageAutopilot(goal)
+      }
+    }
+
     void autopilot.tick(entity)
     autopilotStatus.update(autopilot.engaged, autopilot.statusLabel, autopilot.statusPhase)
+    // Covers auto-disengage inside autopilot.tick() (full-stop reaching zero speed, target lost,
+    // calibration failure) — those don't go through disengageAutopilot()/engageAutopilot() above.
+    if (!autopilot.engaged) saveAutopilotGoal(null)
 
     orientationPanel.update(readOrientation(entity), readEngineActivations(entity, modules), readFuelLevels(entity, modules))
 
