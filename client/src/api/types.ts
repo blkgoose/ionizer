@@ -57,6 +57,7 @@ export interface SystemMapEntry {
   kind: "star" | "planet" | string
   position: FloatingOriginPosition
   diameter_m: number
+  mass_kg: number
 }
 
 /** Radar.scan's ActionResult::ScanResult — a Rust tuple, serialized as a 3-element JSON array. */

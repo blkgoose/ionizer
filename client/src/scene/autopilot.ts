@@ -20,8 +20,15 @@ const RAD_TO_DEG = 180 / Math.PI
 const MAX_CALIBRATION_ATTEMPTS = 2
 const TIMING_SMOOTHING = 0.2
 const ALIGNMENT_TOLERANCE_DEG = 25 // safety gate during burning: cut the main engine if drift ever exceeds this mid-burn
-const APPROACH_GAIN = 0.4 // desired closing speed per meter of remaining distance, while still accelerating
-const MAX_APPROACH_SPEED = 40 // m/s
+// Cruise-speed governor for "burning": rather than a flat cap (which made a 260,000km orbit
+// transit sit at a 40 m/s crawl — ~75 days — because that was tuned for meter/km-scale docking),
+// desired speed follows the same sqrt(2*a*d) constant-deceleration curve the shouldBrake exit
+// check already uses, so it's fast far away and naturally tapers down approaching the target,
+// only ever bounded by MAX_CRUISE_SPEED. Since coasting at cruise burns no fuel (forward thrust
+// only fires while accelerating/braking, see the speedError check below), 1000 m/s round-tripped
+// fine fuel-wise in live testing on this ship's loadout — keep it here rather than a lower,
+// more conservative estimate.
+const MAX_CRUISE_SPEED = 1000 // m/s
 const SPEED_GAIN = 20 // pct of thrust per m/s of speed error
 const SPEED_DEADBAND = 0.3 // m/s — inside this, don't bother thrusting
 
@@ -452,7 +459,7 @@ export class Autopilot {
         }
 
         if (this.phase === "burning" && pointing.angleDeg < ALIGNMENT_TOLERANCE_DEG && remaining > 0) {
-          const desiredSpeed = Math.min(MAX_APPROACH_SPEED, remaining * APPROACH_GAIN)
+          const desiredSpeed = Math.min(MAX_CRUISE_SPEED, Math.sqrt(2 * ASSUMED_MAX_DECEL_MPS2 * remaining))
           const speedError = desiredSpeed - closingSpeed
           if (speedError > SPEED_DEADBAND) forward = Math.min(100, speedError * SPEED_GAIN)
         } else if (this.phase === "stopping") {
@@ -488,6 +495,24 @@ export class Autopilot {
 export const autopilot = new Autopilot()
 
 const ORBIT_ANGULAR_SPEED = 0.05 // rad/s — arbitrary, just needs to be slow enough to be chaseable
+const GRAVITATIONAL_CONSTANT = 6.674e-11 // m^3 kg^-1 s^-2, matches ion server's physics.rs
+
+// The old flat "body radius + 200m" orbit distance put the chase point basically at the surface
+// for any sizeable body — survivable only by coincidence for small/low-mass bodies, and deep
+// inside a gravity well far stronger than the ship's own thrust for anything planet-sized (the
+// same class of bug the ion repo's fixture spawn point had to be moved away from). Gravity
+// depends on the body's mass, not its diameter (galaxy.rs rolls them independently), so this
+// needs mass_kg (system_map.rs) to compute an actual safe altitude instead of guessing from size
+// alone. ORBIT_MAX_GRAVITY_ACCEL_MPS2 keeps gravity at the orbit distance well under
+// fixed_thruster.rs's documented ~0.5 m/s^2 ship accel, leaving headroom for the ship to actually
+// counter gravity *and* chase the orbit point, not just barely cancel it out.
+const ORBIT_MAX_GRAVITY_ACCEL_MPS2 = 0.2
+
+/** A safe orbit distance for a body of the given radius/mass: far enough that gravity there is comfortably within the ship's own thrust capability, never closer than the body's surface. */
+export function safeOrbitRadiusM(bodyRadiusM: number, massKg: number): number {
+  const gravityLimitedRadius = massKg > 0 ? Math.sqrt((GRAVITATIONAL_CONSTANT * massKg) / ORBIT_MAX_GRAVITY_ACCEL_MPS2) : 0
+  return Math.max(bodyRadiusM + 200, gravityLimitedRadius)
+}
 
 /** A point that revolves around `center` at `radius`, in a plane picked from the engage moment. */
 export function orbitTargetPosition(

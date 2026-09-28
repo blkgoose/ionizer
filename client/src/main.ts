@@ -17,7 +17,7 @@ import { FlightScene } from "./scene/scene"
 import { Starfield } from "./scene/starfield"
 import { IntelligentPropulsion } from "./scene/propulsion"
 import { TacticalCameraController } from "./scene/tacticalCamera"
-import { autopilot, orbitTargetPosition } from "./scene/autopilot"
+import { autopilot, orbitTargetPosition, safeOrbitRadiusM } from "./scene/autopilot"
 import { getControlMode } from "./state/controlMode"
 import {
   shipStatePoller,
@@ -264,7 +264,8 @@ function startGame(): void {
     if (!position) return
     // SystemMapEntry's diameter_m is a diameter, not a radius.
     const bodyRadiusM = (systemMapPoller.getLatest()[entryIndex]?.diameter_m ?? 0) / 2
-    const orbitRadius = Math.max(bodyRadiusM + 200, ARRIVAL_RADIUS_M)
+    const massKg = systemMapPoller.getLatest()[entryIndex]?.mass_kg ?? 0
+    const orbitRadius = Math.max(safeOrbitRadiusM(bodyRadiusM, massKg), ARRIVAL_RADIUS_M)
     const shipPosition = readFloatingPosition(shipStatePoller.getLatest() ?? {})
     const distanceLabel = shipPosition ? ` — ${formatDistance(Math.hypot(...relativeVector(shipPosition, position)))}` : ""
     contextMenu.show(
