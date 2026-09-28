@@ -66,7 +66,9 @@ function startGame(): void {
     // the viewport, so this trigger always centers the menu instead of anchoring it to the row.
     showBodyMenu(clientX, clientY, entryIndex, kind, position, true)
   })
-  const radarPanel = new RadarPanel(app)
+  const radarPanel = new RadarPanel(app, (entityId, clientX, clientY) => {
+    showShipMenu(clientX, clientY, entityId, true)
+  })
   const orientationPanel = new OrientationPanel(app)
   const directionMarkers = new DirectionMarkers(app)
   const fpsCounter = new FpsCounter(app)
@@ -215,7 +217,7 @@ function startGame(): void {
   // caught up yet on the very first ship-state tick) — see the shipStatePoller.subscribe callback below.
   let pendingResume: AutopilotGoal | null = loadAutopilotGoal()
 
-  function showShipMenu(x: number, y: number, entityId: string): void {
+  function showShipMenu(x: number, y: number, entityId: string, centered = false): void {
     const turretModule = currentModules.find((m) => m.type === "Turret")
     const shipPosition = readFloatingPosition(shipStatePoller.getLatest() ?? {})
     const contact = radarPoller.getLatest().find(([id]) => id === entityId)
@@ -223,41 +225,65 @@ function startGame(): void {
     const contactRadiusM = contact ? contact[2] / 2 : 0
     const distanceLabel =
       shipPosition && contact ? ` — ${formatDistance(Math.hypot(...relativeVector(shipPosition, contact[1])))}` : ""
-    contextMenu.show(x, y, `Nave ${entityId.slice(0, 8)}${distanceLabel}`, [
-      {
-        label: "Target",
-        onSelect: () => {
-          if (turretModule) void ionClient.set(turretModule.module_id, "target", entityId)
+    const orbitRadius = Math.max(safeOrbitRadiusM(contactRadiusM, 0, autopilot.getMeasuredAccel()), ARRIVAL_RADIUS_M)
+    contextMenu.show(
+      x,
+      y,
+      `Nave ${entityId.slice(0, 8)}${distanceLabel}`,
+      [
+        {
+          label: "Orbit",
+          onSelect: () => {
+            if (!contact) return
+            // Same snapshot-center limitation as a body orbit (see showBodyMenu): the chase point
+            // circles where the contact was at engage time, not a live-tracked position, since a
+            // moving ship has no stable "center" to keep re-deriving from a single scan.
+            engageAutopilot({
+              kind: "orbit",
+              center: contact[1],
+              radiusM: orbitRadius,
+              arrivalRadius: ARRIVAL_RADIUS_M,
+              startedAtMs: Date.now(),
+              label: `Orbit ${entityId.slice(0, 8)}`,
+            })
+          },
         },
-      },
-      {
-        label: "Approach",
-        onSelect: () => {
-          engageAutopilot({
-            kind: "shipApproach",
-            entityId,
-            arrivalRadius: ARRIVAL_RADIUS_M,
-            targetRadiusM: contactRadiusM,
-            label: `Approach ${entityId.slice(0, 8)}`,
-          })
+        {
+          label: "Approach",
+          onSelect: () => {
+            engageAutopilot({
+              kind: "shipApproach",
+              entityId,
+              arrivalRadius: ARRIVAL_RADIUS_M,
+              targetRadiusM: contactRadiusM,
+              label: `Approach ${entityId.slice(0, 8)}`,
+            })
+          },
         },
-      },
-      {
-        // Tuning + pointing only — aims the nose at the target and holds once settled, without
-        // ever engaging the main engine.
-        label: "Point",
-        onSelect: () => {
-          engageAutopilot({
-            kind: "shipApproach",
-            entityId,
-            arrivalRadius: ARRIVAL_RADIUS_M,
-            targetRadiusM: contactRadiusM,
-            label: `Point ${entityId.slice(0, 8)}`,
-            pointOnly: true,
-          })
+        {
+          // Tuning + pointing only — aims the nose at the target and holds once settled, without
+          // ever engaging the main engine.
+          label: "Point",
+          onSelect: () => {
+            engageAutopilot({
+              kind: "shipApproach",
+              entityId,
+              arrivalRadius: ARRIVAL_RADIUS_M,
+              targetRadiusM: contactRadiusM,
+              label: `Point ${entityId.slice(0, 8)}`,
+              pointOnly: true,
+            })
+          },
         },
-      },
-    ])
+        {
+          label: "Target",
+          onSelect: () => {
+            if (turretModule) void ionClient.set(turretModule.module_id, "target", entityId)
+          },
+        },
+      ],
+      centered,
+    )
   }
 
   function showBodyMenu(x: number, y: number, entryIndex: number, kind: string, position: FloatingOriginPosition | null, centered = false): void {

@@ -256,7 +256,6 @@ canvas {
   background: rgba(0, 0, 0, 0.5);
   border: 1px solid #333;
   font-size: 0.7rem;
-  pointer-events: none;
   max-width: 260px;
 }
 
@@ -270,6 +269,18 @@ canvas {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.radar-panel-row.clickable {
+  cursor: pointer;
+  padding: 0.1rem 0.2rem;
+  margin: 0 -0.2rem;
+  border-radius: 2px;
+}
+
+.radar-panel-row.clickable:hover {
+  background: #1a2a2a;
+  color: #fff;
 }
 
 .modules-modal {
