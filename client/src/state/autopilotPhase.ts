@@ -2,7 +2,16 @@ import type { AutopilotPhase } from "../scene/autopilot"
 
 const STORAGE_KEY = "ion.autopilot.phase"
 
-const VALID_PHASES: readonly AutopilotPhase[] = ["idle", "tuning", "pointing", "burning", "stoppingBurner", "reverse", "stopping"]
+const VALID_PHASES: readonly AutopilotPhase[] = [
+  "idle",
+  "tuning",
+  "pointing",
+  "burning",
+  "stoppingBurner",
+  "reverse",
+  "stopping",
+  "fineStop",
+]
 
 /**
  * Persisted in localStorage, not sessionStorage like autopilotGoal.ts's in-flight goal — a refresh

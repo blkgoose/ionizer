@@ -32,6 +32,15 @@ const MAX_CRUISE_SPEED = 1000 // m/s
 const SPEED_GAIN = 20 // pct of thrust per m/s of speed error
 const SPEED_DEADBAND = 0.3 // m/s — inside this, don't bother thrusting
 
+// Below this closing speed, hand off from the powerful main engine to the much weaker retro
+// thruster (SteeringThruster, only ~3% of FixedThruster's power per steering_thruster.rs) for the
+// final approach to zero — "1% of the big engine" is still a coarse, quantized-feeling force step
+// on a strong thruster; the retro thruster is genuinely gentle at 100%, giving far finer control
+// right where overshoot is most likely. Requires flipping the nose back to prograde first (the
+// retro mount fires opposite the nose, so it only decelerates while pointed the way the ship is
+// actually travelling — the reverse of the flip-to-retrograde the main engine needed).
+const RETRO_HANDOFF_SPEED_MPS = 3
+
 // "Pointing"/"reverse" only hand off to the next phase once the ship is actually settled: aligned
 // *and* no longer spinning — a loose angle-only tolerance (like the old ALIGNMENT_TOLERANCE_DEG
 // gate) lets the nose swing straight through the target heading while still rotating fast, so the
@@ -100,8 +109,11 @@ export type AutopilotGoal = "approach" | "orbit"
  *    doesn't rotate while still under forward thrust.
  *  - reverse: rotate to retrograde (opposite the current velocity vector) and wait for it to
  *    settle, same as pointing.
- *  - stopping: burn retrograde until closing speed reaches ~0; then either arrived (disengage) or
- *    still short of the target (loop back to pointing for another cycle).
+ *  - stopping: burn retrograde on the main engine until closing speed drops under
+ *    RETRO_HANDOFF_SPEED_MPS.
+ *  - fineStop: flip back to prograde and finish killing closing speed to ~0 on the much weaker
+ *    retro thruster, for fine control right where overshoot is most likely; then either arrived
+ *    (disengage) or still short of the target (loop back to pointing for another cycle).
  * "stopMode" (full stop in place) skips straight from tuning to reverse/stopping — there's no
  * target to point at or burn towards.
  * Distances are measured to the target's surface (position + its own radius), not its center, so
@@ -109,7 +121,7 @@ export type AutopilotGoal = "approach" | "orbit"
  * "orbit" is approximated by chasing a point that revolves around the target body, which
  * produces a roughly circular path but isn't a stable orbit — not real orbital mechanics.
  */
-export type AutopilotPhase = "idle" | "tuning" | "pointing" | "burning" | "stoppingBurner" | "reverse" | "stopping"
+export type AutopilotPhase = "idle" | "tuning" | "pointing" | "burning" | "stoppingBurner" | "reverse" | "stopping" | "fineStop"
 
 /**
  * The current phase is persisted (see autopilotPhase.ts) so a page refresh can resume mid-maneuver
@@ -217,10 +229,10 @@ export class Autopilot {
   resumePhase(storedPhase: AutopilotPhase | null): void {
     if (!storedPhase || !this.gains) return
     const resumable: AutopilotPhase[] = this.stopMode
-      ? ["reverse", "stopping"]
+      ? ["reverse", "stopping", "fineStop"]
       : this.pointOnly
         ? ["pointing"]
-        : ["pointing", "burning", "stoppingBurner", "reverse", "stopping"]
+        : ["pointing", "burning", "stoppingBurner", "reverse", "stopping", "fineStop"]
     if (resumable.includes(storedPhase)) this.enterPhase(storedPhase, Date.now())
   }
 
@@ -415,6 +427,9 @@ export class Autopilot {
 
     const retrogradeDirection =
       velocityVec.lengthSq() > 0 ? velocityVec.clone().normalize().negate() : (worldDirection?.clone().negate() ?? new THREE.Vector3(1, 0, 0))
+    // Where the retro thruster needs the nose pointed to actually decelerate: the way the ship is
+    // travelling, i.e. the opposite of retrogradeDirection above.
+    const progradeDirection = retrogradeDirection.clone().negate()
 
     const aimFor = (phase: AutopilotPhase): THREE.Vector3 | null => {
       switch (phase) {
@@ -425,6 +440,8 @@ export class Autopilot {
         case "reverse":
         case "stopping":
           return retrogradeDirection
+        case "fineStop":
+          return progradeDirection
         default:
           return null
       }
@@ -443,6 +460,7 @@ export class Autopilot {
 
     let commands: AxisValues = { yaw: 0, pitch: 0, roll: 0 }
     let forward = 0
+    let retroForward = 0
 
     if (this.phase === "tuning") {
       const probe = this.calibrator.command(now)
@@ -488,6 +506,11 @@ export class Autopilot {
           if (this.trackSettle(pointingNow, rates, now)) this.enterPhase("stopping", now)
           break
         case "stopping":
+          // Hand off to the retro thruster once slow enough for it to actually matter — see
+          // RETRO_HANDOFF_SPEED_MPS.
+          if (closingSpeed <= RETRO_HANDOFF_SPEED_MPS) this.enterPhase("fineStop", now)
+          break
+        case "fineStop":
           if (closingSpeed <= SPEED_DEADBAND) {
             if (this.stopMode || remaining <= 0) {
               this.disengage()
@@ -516,11 +539,15 @@ export class Autopilot {
           if (speedError > SPEED_DEADBAND) forward = Math.min(100, speedError * SPEED_GAIN)
         } else if (this.phase === "stopping") {
           // Proportional, not bang-bang: target speed is 0, so treat closingSpeed itself as the
-          // speed error (same SPEED_GAIN as the cruise governor above). A flat 100%-until-deadband
-          // command overshoots straight past zero on the last full-throttle tick (there's no
-          // reverse thruster to correct it), leaving the ship moving the other way and needing to
-          // flip around and try again — the "spins and never settles" symptom.
+          // speed error (same SPEED_GAIN as the cruise governor above). Still the main engine here
+          // (closingSpeed is always > RETRO_HANDOFF_SPEED_MPS in this phase), so this only tapers
+          // the last stretch down to the retro-thruster handoff, not all the way to a full stop.
           forward = closingSpeed > SPEED_DEADBAND ? Math.min(100, closingSpeed * SPEED_GAIN) : 0
+        } else if (this.phase === "fineStop" && pointing.angleDeg < ALIGNMENT_TOLERANCE_DEG) {
+          // Finish killing the last few m/s on the retro thruster (~3% of the main engine's power,
+          // see RETRO_HANDOFF_SPEED_MPS) instead of a sliver of the main engine — genuinely gentle,
+          // not just a small percentage of something powerful, right where overshoot matters most.
+          retroForward = closingSpeed > SPEED_DEADBAND ? Math.min(100, closingSpeed * SPEED_GAIN) : 0
         }
       }
     }
@@ -533,7 +560,7 @@ export class Autopilot {
       for (const axis of RCS_AXES) this.queueSet(jobs, t.module_id, axis, commands[axis])
     }
     for (const t of this.thrusters.fixed) this.queueSet(jobs, t.module_id, "activation", forward)
-    for (const t of this.thrusters.retro) this.queueSet(jobs, t.module_id, "activation", 0)
+    for (const t of this.thrusters.retro) this.queueSet(jobs, t.module_id, "activation", retroForward)
     if (jobs.length === 0) return
 
     this.inFlight = true

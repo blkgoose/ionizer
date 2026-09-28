@@ -8,6 +8,7 @@ const PHASE_LABELS: Record<AutopilotPhase, string> = {
   stoppingBurner: "Arresto propulsore",
   reverse: "Inversione di rotta",
   stopping: "Frenata",
+  fineStop: "Frenata di precisione",
 }
 
 export class AutopilotStatus {
