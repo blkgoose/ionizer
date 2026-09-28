@@ -515,7 +515,12 @@ export class Autopilot {
           const speedError = desiredSpeed - closingSpeed
           if (speedError > SPEED_DEADBAND) forward = Math.min(100, speedError * SPEED_GAIN)
         } else if (this.phase === "stopping") {
-          forward = closingSpeed > SPEED_DEADBAND ? 100 : 0
+          // Proportional, not bang-bang: target speed is 0, so treat closingSpeed itself as the
+          // speed error (same SPEED_GAIN as the cruise governor above). A flat 100%-until-deadband
+          // command overshoots straight past zero on the last full-throttle tick (there's no
+          // reverse thruster to correct it), leaving the ship moving the other way and needing to
+          // flip around and try again — the "spins and never settles" symptom.
+          forward = closingSpeed > SPEED_DEADBAND ? Math.min(100, closingSpeed * SPEED_GAIN) : 0
         }
       }
     }
