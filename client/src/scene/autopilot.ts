@@ -224,6 +224,11 @@ export class Autopilot {
     if (resumable.includes(storedPhase)) this.enterPhase(storedPhase, Date.now())
   }
 
+  /** The live-measured main-engine acceleration (m/s^2), or null before any real full-throttle sample exists. */
+  getMeasuredAccel(): number | null {
+    return this.measuredAccel
+  }
+
   /** True once the ship has been continuously aligned+non-rotating for POINTING_SETTLE_MS. */
   private trackSettle(pointingNow: { angleDeg: number } | null, rates: AxisValues, nowMs: number): boolean {
     if (!pointingNow || !isSettled(pointingNow, rates)) {
@@ -552,14 +557,19 @@ const GRAVITATIONAL_CONSTANT = 6.674e-11 // m^3 kg^-1 s^-2, matches ion server's
 // same class of bug the ion repo's fixture spawn point had to be moved away from). Gravity
 // depends on the body's mass, not its diameter (galaxy.rs rolls them independently), so this
 // needs mass_kg (system_map.rs) to compute an actual safe altitude instead of guessing from size
-// alone. ORBIT_MAX_GRAVITY_ACCEL_MPS2 keeps gravity at the orbit distance well under
-// fixed_thruster.rs's documented ~0.5 m/s^2 ship accel, leaving headroom for the ship to actually
-// counter gravity *and* chase the orbit point, not just barely cancel it out.
+// alone. Before any real thrust measurement exists yet (see measureAccel()), fall back to a
+// gravity budget of ORBIT_MAX_GRAVITY_ACCEL_MPS2 — a guess based on fixed_thruster.rs's
+// documented ~0.5 m/s^2 ship accel, known to be wrong for other loadouts (see ASSUMED_MAX_DECEL_MPS2).
 const ORBIT_MAX_GRAVITY_ACCEL_MPS2 = 0.2
+// Once real thrust is measured, only budget this fraction of it for cancelling gravity, leaving
+// the rest as headroom to actually chase the moving orbit point — same 0.4 ratio as the
+// guessed fallback above (0.2 / 0.5).
+const ORBIT_GRAVITY_BUDGET_FRACTION = 0.4
 
-/** A safe orbit distance for a body of the given radius/mass: far enough that gravity there is comfortably within the ship's own thrust capability, never closer than the body's surface. */
-export function safeOrbitRadiusM(bodyRadiusM: number, massKg: number): number {
-  const gravityLimitedRadius = massKg > 0 ? Math.sqrt((GRAVITATIONAL_CONSTANT * massKg) / ORBIT_MAX_GRAVITY_ACCEL_MPS2) : 0
+/** A safe orbit distance for a body of the given radius/mass: far enough that gravity there is comfortably within the ship's own thrust capability, never closer than the body's surface. Uses the live-measured main-engine acceleration when available (see Autopilot.getMeasuredAccel()), falling back to a conservative guess otherwise. */
+export function safeOrbitRadiusM(bodyRadiusM: number, massKg: number, measuredAccelMps2: number | null = null): number {
+  const gravityBudget = measuredAccelMps2 !== null ? measuredAccelMps2 * ORBIT_GRAVITY_BUDGET_FRACTION : ORBIT_MAX_GRAVITY_ACCEL_MPS2
+  const gravityLimitedRadius = massKg > 0 ? Math.sqrt((GRAVITATIONAL_CONSTANT * massKg) / gravityBudget) : 0
   return Math.max(bodyRadiusM + 200, gravityLimitedRadius)
 }
 

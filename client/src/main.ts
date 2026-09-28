@@ -265,7 +265,7 @@ function startGame(): void {
     // SystemMapEntry's diameter_m is a diameter, not a radius.
     const bodyRadiusM = (systemMapPoller.getLatest()[entryIndex]?.diameter_m ?? 0) / 2
     const massKg = systemMapPoller.getLatest()[entryIndex]?.mass_kg ?? 0
-    const orbitRadius = Math.max(safeOrbitRadiusM(bodyRadiusM, massKg), ARRIVAL_RADIUS_M)
+    const orbitRadius = Math.max(safeOrbitRadiusM(bodyRadiusM, massKg, autopilot.getMeasuredAccel()), ARRIVAL_RADIUS_M)
     const shipPosition = readFloatingPosition(shipStatePoller.getLatest() ?? {})
     const distanceLabel = shipPosition ? ` — ${formatDistance(Math.hypot(...relativeVector(shipPosition, position)))}` : ""
     contextMenu.show(
