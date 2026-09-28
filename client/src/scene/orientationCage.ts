@@ -21,7 +21,13 @@ function buildRing(color: number, plane: "xz" | "xy"): THREE.LineLoop {
     points.push(plane === "xz" ? new THREE.Vector3(a, 0, b) : new THREE.Vector3(a, b, 0))
   }
   const geometry = new THREE.BufferGeometry().setFromPoints(points)
-  return new THREE.LineLoop(geometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 }))
+  const ring = new THREE.LineLoop(geometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5, depthWrite: false }))
+  // Same fixed-fake-distance problem as starfield.ts's skybox dots: this ring sits at a small,
+  // arbitrary radius around the camera (RING_RADIUS_M), so real depth-testing would let it win
+  // against any true-to-scale nearby object still farther than that — depthWrite:false + a low
+  // renderOrder keeps it purely a background reference, never occluding real geometry.
+  ring.renderOrder = -1
+  return ring
 }
 
 export class OrientationCage {
@@ -38,7 +44,15 @@ export class OrientationCage {
     }
     const starGeometry = new THREE.BufferGeometry()
     starGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3))
-    const stars = new THREE.Points(starGeometry, new THREE.PointsMaterial({ color: 0xaaaaaa, size: 2, sizeAttenuation: false }))
+    const stars = new THREE.Points(
+      starGeometry,
+      new THREE.PointsMaterial({ color: 0xaaaaaa, size: 2, sizeAttenuation: false, depthWrite: false }),
+    )
+    // Same fixed-fake-distance issue as the rings below: these points sit at a small, arbitrary
+    // radius around the camera (STAR_RADIUS_M), so real depth-testing would let them win against
+    // any true-to-scale nearby object still farther than that — depthWrite:false + a low
+    // renderOrder keeps this purely a background reference, never occluding real geometry.
+    stars.renderOrder = -1
 
     this.group.add(stars, buildRing(0x2266aa, "xz"), buildRing(0x225533, "xy"))
     scene.add(this.group)

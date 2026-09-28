@@ -101,9 +101,17 @@ export class Starfield {
         mesh = new THREE.Mesh(
           new THREE.SphereGeometry(visualRadius, 12, 8),
           isStar
-            ? new THREE.MeshBasicMaterial({ color: 0xfff4c2 })
-            : new THREE.MeshLambertMaterial({ color: 0x6699cc, flatShading: true }),
+            ? new THREE.MeshBasicMaterial({ color: 0xfff4c2, depthWrite: false })
+            : new THREE.MeshLambertMaterial({ color: 0x6699cc, flatShading: true, depthWrite: false }),
         )
+        // A fixed, arbitrarily-close stand-in distance (SKY_RADIUS_M, 30km) for something that's
+        // actually light-years away — real depth-testing would otherwise let this dot win against
+        // any true-to-scale near body still farther than 30km out (i.e. most of an approach), even
+        // though it should never occlude a real object. depthWrite:false + a low renderOrder is
+        // the standard skybox trick: this draws first and leaves no depth value behind, so
+        // whatever's drawn afterwards (any real scene geometry, regardless of its own true depth)
+        // always wins.
+        mesh.renderOrder = -1
         mesh.position.copy(anchor).addScaledVector(direction, SKY_RADIUS_M * (isStar ? 1 : 0.85))
         // Deliberately oversized hit-target: the visual body is a stylized skybox dot, not
         // to-scale, too small to reliably click — material.visible = false skips rendering but
