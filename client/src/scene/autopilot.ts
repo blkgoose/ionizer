@@ -40,6 +40,14 @@ const BRAKE_MARGIN = 1.3
 const ASSUMED_TURN_RATE_DEG_S = 20
 const MANEUVER_SETTLE_S = 1.5
 
+// axisCommand's delay-compensated prediction is only as good as its delay estimate: avgSetRttS is
+// a slow-reacting EMA (TIMING_SMOOTHING) of round-trip latency, so a real spike (server hiccup,
+// slow network) leaves the rate loop under-braking against a bigger-than-assumed delay for several
+// ticks — the command stays near max for longer than the model thinks, and the ship overshoots the
+// target heading before it can react. Padding the delay estimate itself (not just distance/rate
+// margins) trades a little responsiveness for headroom against exactly that gap.
+const RCS_DELAY_SAFETY_MARGIN = 1.5
+
 export type AutopilotGoal = "approach" | "orbit"
 export type AutopilotPhase = "idle" | "calibrating" | "cruise" | "braking"
 
@@ -308,7 +316,7 @@ export class Autopilot {
 
     const gains = this.gains
     if (gains) {
-      const delayS = this.avgSetRttS + this.avgTickS
+      const delayS = (this.avgSetRttS + this.avgTickS) * RCS_DELAY_SAFETY_MARGIN
       const errors: AxisValues = { yaw: pointing.yawDeg, pitch: pointing.pitchDeg, roll: 0 }
       for (const axis of RCS_AXES) {
         const gain = gains[axis as RcsAxis]
