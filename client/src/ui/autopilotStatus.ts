@@ -2,9 +2,12 @@ import type { AutopilotPhase } from "../scene/autopilot"
 
 const PHASE_LABELS: Record<AutopilotPhase, string> = {
   idle: "",
-  calibrating: "Calibrazione RCS…",
-  cruise: "In rotta",
-  braking: "Frenata",
+  tuning: "Calibrazione RCS…",
+  pointing: "Puntamento",
+  burning: "Accelerazione",
+  stoppingBurner: "Arresto propulsore",
+  reverse: "Inversione di rotta",
+  stopping: "Frenata",
 }
 
 export class AutopilotStatus {

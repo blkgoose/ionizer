@@ -14,15 +14,25 @@ import {
   type ModuleRef,
 } from "../state/shipState"
 import { calibrationMatches, loadAutopilotCalibration, saveAutopilotCalibration } from "../state/autopilotCalibration"
+import { saveAutopilotPhase } from "../state/autopilotPhase"
 
 const RAD_TO_DEG = 180 / Math.PI
 const MAX_CALIBRATION_ATTEMPTS = 2
 const TIMING_SMOOTHING = 0.2
-const ALIGNMENT_TOLERANCE_DEG = 25 // only burn the main engine once pointed this close to the target heading
+const ALIGNMENT_TOLERANCE_DEG = 25 // safety gate during burning: cut the main engine if drift ever exceeds this mid-burn
 const APPROACH_GAIN = 0.4 // desired closing speed per meter of remaining distance, while still accelerating
 const MAX_APPROACH_SPEED = 40 // m/s
 const SPEED_GAIN = 20 // pct of thrust per m/s of speed error
 const SPEED_DEADBAND = 0.3 // m/s — inside this, don't bother thrusting
+
+// "Pointing"/"reverse" only hand off to the next phase once the ship is actually settled: aligned
+// *and* no longer spinning — a loose angle-only tolerance (like the old ALIGNMENT_TOLERANCE_DEG
+// gate) lets the nose swing straight through the target heading while still rotating fast, so the
+// ship "looks" aligned for an instant but is still tumbling when thrust kicks in. Both conditions
+// must hold continuously for POINTING_SETTLE_MS, not just on one sample, to reject noise.
+const POINTING_ANGLE_TOLERANCE_DEG = 3
+const POINTING_RATE_TOLERANCE_DEG_S = 1
+const POINTING_SETTLE_MS = 400
 
 // Neither of these is measured from the ship's actual mass/thrust (not exposed by GET) — they're
 // a conservative assumed deceleration capability, used only to decide *when* to flip and start
@@ -40,6 +50,10 @@ const BRAKE_MARGIN = 1.3
 const ASSUMED_TURN_RATE_DEG_S = 20
 const MANEUVER_SETTLE_S = 1.5
 
+// How long to hold the main engine at 0 before starting the turn to retrograde — gives the
+// in-flight SET a tick to actually land so the ship isn't still thrusting forward while rotating.
+const STOPPING_BURNER_DWELL_MS = 300
+
 // axisCommand's delay-compensated prediction is only as good as its delay estimate: avgSetRttS is
 // a slow-reacting EMA (TIMING_SMOOTHING) of round-trip latency, so a real spike (server hiccup,
 // slow network) leaves the rate loop under-braking against a bigger-than-assumed delay for several
@@ -49,23 +63,49 @@ const MANEUVER_SETTLE_S = 1.5
 const RCS_DELAY_SAFETY_MARGIN = 1.5
 
 export type AutopilotGoal = "approach" | "orbit"
-export type AutopilotPhase = "idle" | "calibrating" | "cruise" | "braking"
 
 /**
- * Simplified "point and burn" autopilot: no server-side flight assist exists, so this drives the
- * same thrusters a player would (RCS to point, Fixed thruster to accelerate/decelerate). Pointing
- * uses a braking-curve controller per RCS axis (see attitude.ts); on every engage() a short RCS
- * doublet first measures the ship's actual angular acceleration per % of command, since that
- * depends on ship size and can't be a constant. Two phases:
- *  - cruise: point at the target and accelerate towards it (capped at MAX_APPROACH_SPEED)
- *  - brake: once the estimated stopping distance (from current closing speed) catches up with
- *    the remaining distance, flip to point retrograde (opposite the velocity vector) and burn
- *    the same engines — now facing the "wrong" way on purpose — until closing speed reaches ~0.
+ * One-way state machine — each phase only ever advances forward, never reverts, so a borderline
+ * measurement can't make the ship flip-flop between e.g. burning and braking every tick (unlike a
+ * per-tick recomputed boolean flag, which chatters right at the decision boundary).
+ *  - idle: not engaged.
+ *  - tuning: RCS calibration doublet (skipped via a cached calibration if the ship's RCS loadout/
+ *    size/mass haven't changed since last measured — see autopilotCalibration.ts).
+ *  - pointing: aim at the target and wait for the ship to actually stop rotating (not just pass
+ *    through the heading), before ever engaging the main engine.
+ *  - burning: accelerate towards the target, capped at MAX_APPROACH_SPEED, until the estimated
+ *    stopping distance (including the coast the upcoming flip-turn itself will cost) catches up
+ *    with the remaining distance.
+ *  - stoppingBurner: cut the main engine and hold it at 0 briefly before turning, so the ship
+ *    doesn't rotate while still under forward thrust.
+ *  - reverse: rotate to retrograde (opposite the current velocity vector) and wait for it to
+ *    settle, same as pointing.
+ *  - stopping: burn retrograde until closing speed reaches ~0; then either arrived (disengage) or
+ *    still short of the target (loop back to pointing for another cycle).
+ * "stopMode" (full stop in place) skips straight from tuning to reverse/stopping — there's no
+ * target to point at or burn towards.
  * Distances are measured to the target's surface (position + its own radius), not its center, so
  * arrival/orbit distances make sense for anything bigger than a point.
  * "orbit" is approximated by chasing a point that revolves around the target body, which
  * produces a roughly circular path but isn't a stable orbit — not real orbital mechanics.
  */
+export type AutopilotPhase = "idle" | "tuning" | "pointing" | "burning" | "stoppingBurner" | "reverse" | "stopping"
+
+/**
+ * The current phase is persisted (see autopilotPhase.ts) so a page refresh can resume mid-maneuver
+ * via resumePhase() instead of restarting the whole approach from tuning/pointing — see main.ts's
+ * pendingResume handling, which calls resumePhase() right after re-engaging the persisted goal.
+ */
+
+function isSettled(pointing: { angleDeg: number }, rates: AxisValues): boolean {
+  return (
+    pointing.angleDeg <= POINTING_ANGLE_TOLERANCE_DEG &&
+    Math.abs(rates.yaw) <= POINTING_RATE_TOLERANCE_DEG_S &&
+    Math.abs(rates.pitch) <= POINTING_RATE_TOLERANCE_DEG_S &&
+    Math.abs(rates.roll) <= POINTING_RATE_TOLERANCE_DEG_S
+  )
+}
+
 export class Autopilot {
   private thrusters = classifyThrusters(null, [])
   private getTargetPosition: ((nowMs: number) => FloatingOriginPosition | null) | null = null
@@ -77,6 +117,9 @@ export class Autopilot {
   private calibrationAttempts = 0
   private gains: AxisGains | null = null
   private phase: AutopilotPhase = "idle"
+  // "Point" (context menu) engages tuning+pointing only — holds heading on the target and never
+  // burns, unlike a full approach.
+  private pointOnly = false
   private rcsIds = ""
   private sizeM: number | null = null
   private massKg: number | null = null
@@ -89,6 +132,11 @@ export class Autopilot {
   private lastCommand: AxisValues = { yaw: 0, pitch: 0, roll: 0 }
   // Last value actually sent per module+variable, so unchanged values aren't re-sent every tick.
   private sent = new Map<string, number>()
+  // Debounce state for the pointing/reverse "settled" check (angle + rate both within tolerance
+  // continuously for POINTING_SETTLE_MS).
+  private settledSinceMs: number | null = null
+  // When the current phase was entered — used by stoppingBurner's fixed dwell.
+  private phaseEnteredAtMs = 0
 
   setModules(modules: ModuleRef[], entity: ShipEntity | null): void {
     this.thrusters = classifyThrusters(entity, modules)
@@ -107,7 +155,7 @@ export class Autopilot {
     const cached = this.cachedCalibration
     if (!cached || !calibrationMatches(cached, this.rcsIds, this.sizeM, this.massKg)) return false
     this.gains = cached.gains
-    this.phase = "cruise"
+    this.enterPhase(this.stopMode ? "reverse" : "pointing", Date.now())
     return true
   }
 
@@ -120,8 +168,44 @@ export class Autopilot {
   private startCalibration(): void {
     this.gains = null
     this.calibrationAttempts++
-    this.phase = "calibrating"
+    this.phase = "tuning"
+    saveAutopilotPhase("tuning")
     this.calibrator.start(Date.now())
+  }
+
+  /** Advances the one-way state machine, resetting whatever per-phase bookkeeping the new phase needs. */
+  private enterPhase(phase: AutopilotPhase, nowMs: number): void {
+    this.phase = phase
+    if (phase === "pointing" || phase === "reverse") this.settledSinceMs = null
+    else if (phase === "stoppingBurner") this.phaseEnteredAtMs = nowMs
+    saveAutopilotPhase(phase)
+  }
+
+  /**
+   * Fast-forwards past tuning/pointing straight back to `storedPhase` after a refresh (see
+   * autopilotPhase.ts), provided it's actually reachable for the goal that was just re-engaged
+   * (e.g. a "Point"-only goal can only resume into "pointing") and a calibration is already in
+   * hand — resuming into e.g. "burning" without gains would silently drift with no RCS/engine
+   * correction at all, since axisCommand needs a measured gain to do anything.
+   */
+  resumePhase(storedPhase: AutopilotPhase | null): void {
+    if (!storedPhase || !this.gains) return
+    const resumable: AutopilotPhase[] = this.stopMode
+      ? ["reverse", "stopping"]
+      : this.pointOnly
+        ? ["pointing"]
+        : ["pointing", "burning", "stoppingBurner", "reverse", "stopping"]
+    if (resumable.includes(storedPhase)) this.enterPhase(storedPhase, Date.now())
+  }
+
+  /** True once the ship has been continuously aligned+non-rotating for POINTING_SETTLE_MS. */
+  private trackSettle(pointingNow: { angleDeg: number } | null, rates: AxisValues, nowMs: number): boolean {
+    if (!pointingNow || !isSettled(pointingNow, rates)) {
+      this.settledSinceMs = null
+      return false
+    }
+    this.settledSinceMs ??= nowMs
+    return nowMs - this.settledSinceMs >= POINTING_SETTLE_MS
   }
 
   private resetForEngage(): void {
@@ -130,6 +214,7 @@ export class Autopilot {
     this.sent.clear()
     this.zeroPending = false
     this.calibrationAttempts = 0
+    this.settledSinceMs = null
     if (!this.tryUseCachedCalibration()) this.startCalibration()
   }
 
@@ -154,21 +239,24 @@ export class Autopilot {
     arrivalRadius: number,
     targetRadiusM: number,
     label: string,
+    pointOnly = false,
   ): void {
     this.getTargetPosition = getTargetPosition
     this.arrivalRadius = arrivalRadius
     this.targetRadius = targetRadiusM
     this.label = label
     this.stopMode = false
+    this.pointOnly = pointOnly
     this.resetForEngage()
   }
 
-  /** Null out all velocity in place — points retrograde and burns until closing speed reaches ~0, then auto-disengages. */
+  /** Null out all velocity in place — turns to retrograde and burns until closing speed reaches ~0, then auto-disengages. */
   engageStop(): void {
     this.getTargetPosition = null
     this.arrivalRadius = 0
     this.targetRadius = 0
     this.stopMode = true
+    this.pointOnly = false
     this.label = "Full stop"
     this.resetForEngage()
   }
@@ -176,9 +264,12 @@ export class Autopilot {
   disengage(): void {
     this.getTargetPosition = null
     this.stopMode = false
+    this.pointOnly = false
     this.label = ""
     this.phase = "idle"
     this.gains = null
+    this.settledSinceMs = null
+    saveAutopilotPhase(null)
     // A tick's SETs may still be in flight; zeroing now could land before them and leave thrusters
     // firing, so defer until that tick completes.
     if (this.inFlight) this.zeroPending = true
@@ -216,63 +307,12 @@ export class Autopilot {
 
     const velocityVec = new THREE.Vector3(velocity.x, velocity.y, velocity.z)
 
-    let braking: boolean
-    let closingSpeed: number
-    let remaining: number
-    let pointDirection: THREE.Vector3
-
-    if (this.stopMode) {
-      const speed = velocityVec.length()
-      if (speed <= SPEED_DEADBAND) {
-        this.disengage()
-        return
-      }
-      braking = true
-      closingSpeed = speed
-      remaining = 0
-      pointDirection = velocityVec.clone().normalize().negate()
-    } else {
-      const shipPosition = readFloatingPosition(entity)
-      if (!shipPosition) return
-
-      const targetPosition = this.getTargetPosition!(Date.now())
-      if (!targetPosition) {
-        this.disengage()
-        return
-      }
-
-      const [dx, dy, dz] = relativeVector(shipPosition, targetPosition)
-      const distanceToCenter = Math.hypot(dx, dy, dz)
-      if (distanceToCenter === 0) return
-
-      const worldDirection = new THREE.Vector3(dx, dy, dz).normalize()
-      const distanceToSurface = Math.max(0, distanceToCenter - this.targetRadius)
-      remaining = distanceToSurface - this.arrivalRadius
-
-      closingSpeed = velocityVec.dot(worldDirection) // positive = approaching the target
-
-      const stoppingDistance = closingSpeed > 0 ? (closingSpeed * closingSpeed) / (2 * ASSUMED_MAX_DECEL_MPS2) : 0
-
-      // How far the flip-to-retrograde maneuver itself would coast before the burn can start:
-      // the turn angle is close to 180° whenever the ship's been tracking the target well (cruise
-      // points at the target, braking points opposite the velocity vector), but computing the
-      // actual angle between them handles cases with real lateral drift too.
-      const retrogradeDirection = velocityVec.lengthSq() > 0 ? velocityVec.clone().normalize().negate() : worldDirection.clone().negate()
-      const turnAngleDeg = THREE.MathUtils.radToDeg(worldDirection.angleTo(retrogradeDirection))
-      const maneuverTimeS = turnAngleDeg / ASSUMED_TURN_RATE_DEG_S + MANEUVER_SETTLE_S
-      const coastDuringManeuver = closingSpeed > 0 ? closingSpeed * maneuverTimeS : 0
-
-      braking = closingSpeed > SPEED_DEADBAND && stoppingDistance * BRAKE_MARGIN + coastDuringManeuver >= remaining
-
-      // Cruise: face the target and accelerate towards it. Brake: flip to face retrograde (the way
-      // we're actually moving, reversed) and fire the very same engines to cancel that velocity —
-      // this is the "rotate the ship, then reactivate the engines" maneuver.
-      pointDirection = braking ? retrogradeDirection : worldDirection
+    if (this.stopMode && velocityVec.length() <= SPEED_DEADBAND) {
+      this.disengage()
+      return
     }
 
     const inverseOrientation = new THREE.Quaternion(orientation.x, orientation.y, orientation.z, orientation.q).invert()
-    const localDir = pointDirection.clone().applyQuaternion(inverseOrientation)
-    const pointing = pointingError(localDir)
 
     // Body-frame rates, right-handed: +Z (yaw) swings the nose towards +Y and +Y (pitch) towards −Z,
     // so a positive rate reduces a positive pointingError() component on both axes.
@@ -288,14 +328,65 @@ export class Autopilot {
       this.avgTickS += TIMING_SMOOTHING * (dt - this.avgTickS)
     }
     this.lastSampleAtMs = now
-    if (this.phase === "calibrating") this.calibrator.record(now, rates)
+
+    // --- geometry: worldDirection/remaining/closingSpeed for approach mode, plain speed for stop mode ---
+    let worldDirection: THREE.Vector3 | null = null
+    let remaining = 0
+    let closingSpeed: number
+    if (this.stopMode) {
+      closingSpeed = velocityVec.length()
+    } else {
+      const shipPosition = readFloatingPosition(entity)
+      if (!shipPosition) return
+
+      const targetPosition = this.getTargetPosition!(now)
+      if (!targetPosition) {
+        this.disengage()
+        return
+      }
+
+      const [dx, dy, dz] = relativeVector(shipPosition, targetPosition)
+      const distanceToCenter = Math.hypot(dx, dy, dz)
+      if (distanceToCenter === 0) return
+
+      worldDirection = new THREE.Vector3(dx, dy, dz).normalize()
+      const distanceToSurface = Math.max(0, distanceToCenter - this.targetRadius)
+      remaining = distanceToSurface - this.arrivalRadius
+      closingSpeed = velocityVec.dot(worldDirection) // positive = approaching the target
+    }
+
+    const retrogradeDirection =
+      velocityVec.lengthSq() > 0 ? velocityVec.clone().normalize().negate() : (worldDirection?.clone().negate() ?? new THREE.Vector3(1, 0, 0))
+
+    const aimFor = (phase: AutopilotPhase): THREE.Vector3 | null => {
+      switch (phase) {
+        case "pointing":
+        case "burning":
+        case "stoppingBurner":
+          return worldDirection
+        case "reverse":
+        case "stopping":
+          return retrogradeDirection
+        default:
+          return null
+      }
+    }
+
+    const computePointing = (dir: THREE.Vector3) => {
+      const localDir = dir.clone().applyQuaternion(inverseOrientation)
+      return pointingError(localDir)
+    }
+
+    if (this.phase === "tuning") this.calibrator.record(now, rates)
 
     // Ticks are fired without awaiting (main.ts), so skip while the previous SETs are still in
     // flight rather than letting stale commands race newer ones to the server.
     if (this.inFlight) return
 
     let commands: AxisValues = { yaw: 0, pitch: 0, roll: 0 }
-    if (this.phase === "calibrating") {
+    let forward = 0
+
+    if (this.phase === "tuning") {
       const probe = this.calibrator.command(now)
       if (!probe.done) {
         commands = probe.values
@@ -304,6 +395,7 @@ export class Autopilot {
         if (gains.yaw !== null && gains.pitch !== null) {
           this.gains = gains
           this.persistCalibration()
+          this.enterPhase(this.stopMode ? "reverse" : "pointing", now)
         } else if (this.calibrationAttempts < MAX_CALIBRATION_ATTEMPTS) {
           this.startCalibration()
         } else {
@@ -312,27 +404,60 @@ export class Autopilot {
           return
         }
       }
-    }
+    } else {
+      // --- state-exit checks, using the CURRENT (pre-transition) phase's aim direction ---
+      const currentAim = aimFor(this.phase)
+      const pointingNow = currentAim ? computePointing(currentAim) : null
 
-    const gains = this.gains
-    if (gains) {
-      const delayS = (this.avgSetRttS + this.avgTickS) * RCS_DELAY_SAFETY_MARGIN
-      const errors: AxisValues = { yaw: pointing.yawDeg, pitch: pointing.pitchDeg, roll: 0 }
-      for (const axis of RCS_AXES) {
-        const gain = gains[axis as RcsAxis]
-        commands[axis] = gain === null ? 0 : axisCommand(errors[axis], rates[axis], gain, this.lastCommand[axis], delayS)
+      switch (this.phase) {
+        case "pointing":
+          if (this.trackSettle(pointingNow, rates, now) && !this.pointOnly) this.enterPhase("burning", now)
+          break
+        case "burning": {
+          const stoppingDistance = closingSpeed > 0 ? (closingSpeed * closingSpeed) / (2 * ASSUMED_MAX_DECEL_MPS2) : 0
+          const turnAngleDeg = THREE.MathUtils.radToDeg(worldDirection!.angleTo(retrogradeDirection))
+          const maneuverTimeS = turnAngleDeg / ASSUMED_TURN_RATE_DEG_S + MANEUVER_SETTLE_S
+          const coastDuringManeuver = closingSpeed > 0 ? closingSpeed * maneuverTimeS : 0
+          const shouldBrake = closingSpeed > SPEED_DEADBAND && stoppingDistance * BRAKE_MARGIN + coastDuringManeuver >= remaining
+          if (shouldBrake) this.enterPhase("stoppingBurner", now)
+          break
+        }
+        case "stoppingBurner":
+          if (now - this.phaseEnteredAtMs >= STOPPING_BURNER_DWELL_MS) this.enterPhase("reverse", now)
+          break
+        case "reverse":
+          if (this.trackSettle(pointingNow, rates, now)) this.enterPhase("stopping", now)
+          break
+        case "stopping":
+          if (closingSpeed <= SPEED_DEADBAND) {
+            if (this.stopMode || remaining <= 0) {
+              this.disengage()
+              return
+            }
+            this.enterPhase("pointing", now)
+          }
+          break
       }
-      this.phase = braking ? "braking" : "cruise"
-    }
 
-    let forward = 0
-    if (gains && pointing.angleDeg < ALIGNMENT_TOLERANCE_DEG) {
-      if (braking) {
-        forward = closingSpeed > SPEED_DEADBAND ? 100 : 0
-      } else if (remaining > 0) {
-        const desiredSpeed = Math.min(MAX_APPROACH_SPEED, remaining * APPROACH_GAIN)
-        const speedError = desiredSpeed - closingSpeed
-        if (speedError > SPEED_DEADBAND) forward = Math.min(100, speedError * SPEED_GAIN)
+      // --- RCS pointing + forward thrust for the (possibly just-updated) phase ---
+      const gains = this.gains
+      const finalAim = aimFor(this.phase)
+      if (gains && finalAim) {
+        const pointing = computePointing(finalAim)
+        const delayS = (this.avgSetRttS + this.avgTickS) * RCS_DELAY_SAFETY_MARGIN
+        const errors: AxisValues = { yaw: pointing.yawDeg, pitch: pointing.pitchDeg, roll: 0 }
+        for (const axis of RCS_AXES) {
+          const gain = gains[axis as RcsAxis]
+          commands[axis] = gain === null ? 0 : axisCommand(errors[axis], rates[axis], gain, this.lastCommand[axis], delayS)
+        }
+
+        if (this.phase === "burning" && pointing.angleDeg < ALIGNMENT_TOLERANCE_DEG && remaining > 0) {
+          const desiredSpeed = Math.min(MAX_APPROACH_SPEED, remaining * APPROACH_GAIN)
+          const speedError = desiredSpeed - closingSpeed
+          if (speedError > SPEED_DEADBAND) forward = Math.min(100, speedError * SPEED_GAIN)
+        } else if (this.phase === "stopping") {
+          forward = closingSpeed > SPEED_DEADBAND ? 100 : 0
+        }
       }
     }
 

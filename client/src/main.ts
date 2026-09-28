@@ -35,6 +35,7 @@ import { systemMapPoller } from "./state/systemMap"
 import { radarPoller } from "./state/radar"
 import type { FloatingOriginPosition } from "./api/types"
 import { loadAutopilotGoal, saveAutopilotGoal, type AutopilotGoal } from "./state/autopilotGoal"
+import { loadAutopilotPhase } from "./state/autopilotPhase"
 
 const PROPULSION_TICK_MS = 100
 const RENDER_INTERVAL_MS = 1000 / 15
@@ -205,7 +206,7 @@ function startGame(): void {
       autopilot.engageStop()
     } else {
       const { getTarget, arrivalRadius, targetRadiusM, label } = resolveGoal(goal)
-      autopilot.engage(getTarget, arrivalRadius, targetRadiusM, label)
+      autopilot.engage(getTarget, arrivalRadius, targetRadiusM, label, goal.kind !== "orbit" && goal.pointOnly)
     }
     saveAutopilotGoal(goal)
   }
@@ -238,6 +239,21 @@ function startGame(): void {
             arrivalRadius: ARRIVAL_RADIUS_M,
             targetRadiusM: contactRadiusM,
             label: `Approach ${entityId.slice(0, 8)}`,
+          })
+        },
+      },
+      {
+        // Tuning + pointing only — aims the nose at the target and holds once settled, without
+        // ever engaging the main engine.
+        label: "Point",
+        onSelect: () => {
+          engageAutopilot({
+            kind: "shipApproach",
+            entityId,
+            arrivalRadius: ARRIVAL_RADIUS_M,
+            targetRadiusM: contactRadiusM,
+            label: `Point ${entityId.slice(0, 8)}`,
+            pointOnly: true,
           })
         },
       },
@@ -283,6 +299,21 @@ function startGame(): void {
             })
           },
         },
+        {
+          // Tuning + pointing only — aims the nose at the target and holds once settled, without
+          // ever engaging the main engine.
+          label: "Point",
+          onSelect: () => {
+            engageAutopilot({
+              kind: "bodyApproach",
+              entryIndex,
+              arrivalRadius: ARRIVAL_RADIUS_M,
+              targetRadiusM: bodyRadiusM,
+              label: `Point ${kind}`,
+              pointOnly: true,
+            })
+          },
+        },
       ],
       centered,
     )
@@ -318,6 +349,10 @@ function startGame(): void {
       if (goal.kind === "stop" || resolveGoal(goal).getTarget(Date.now()) !== null) {
         pendingResume = null
         engageAutopilot(goal)
+        // Fast-forwards back to whatever phase (burning/reverse/stopping/…) the autopilot was in
+        // before the refresh, instead of restarting the maneuver from tuning/pointing — see
+        // autopilotPhase.ts.
+        autopilot.resumePhase(loadAutopilotPhase())
       }
     }
 
