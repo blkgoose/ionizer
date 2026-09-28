@@ -1,9 +1,10 @@
 import type { ModuleManifest, ShipEntity } from "./types"
 import { IonCommandError } from "./types"
 
-// Same host the client itself was loaded from — "localhost" would resolve to the
+// Falls back to the same host the client was loaded from — "localhost" would resolve to the
 // browser's own machine when the client is opened remotely (e.g. http://192.168.1.4:3003).
-const SERVER_URL = `http://${window.location.hostname}:3001/api/v1`
+const SERVER_URL: string =
+  import.meta.env.VITE_SERVER_URL || `http://${window.location.hostname}:3001/api/v1`
 const TOKEN_STORAGE_KEY = "ion.token"
 
 async function sendCommand(command: string, token: string | null): Promise<string> {
