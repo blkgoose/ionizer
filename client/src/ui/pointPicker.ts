@@ -1,3 +1,5 @@
+import { setInputCaptured } from "../state/inputCapture"
+
 export interface PointPickerEntry {
   label: string
   distanceM: number
@@ -71,12 +73,14 @@ export class PointPicker {
     this.selectedIndex = 0
     this.isOpen = true
     this.el.classList.remove("hidden")
+    setInputCaptured(true)
     this.render()
   }
 
   close(): void {
     this.isOpen = false
     this.el.classList.add("hidden")
+    setInputCaptured(false)
   }
 
   private move(delta: number): void {

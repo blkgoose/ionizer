@@ -1,4 +1,5 @@
 import * as THREE from "three"
+import { isInputCaptured } from "../state/inputCapture"
 
 const ZOOM_FACTOR = 1.15
 const MIN_DISTANCE = 20
@@ -57,6 +58,10 @@ export class TacticalCameraController {
   }
 
   private readonly onKey = (e: KeyboardEvent, pressed: boolean): void => {
+    // A modal (e.g. the Ctrl+K point picker) is using these same keys for its own navigation right
+    // now — don't also pan the camera underneath it. Only guards the press, not the release, so a
+    // key already held before the modal opened still clears correctly on keyup.
+    if (pressed && isInputCaptured()) return
     const key = e.key.toLowerCase()
     if (key === "w" || key === "arrowup") this.keyDown.up = pressed
     else if (key === "s" || key === "arrowdown") this.keyDown.down = pressed
