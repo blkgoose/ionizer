@@ -1,6 +1,7 @@
 import * as THREE from "three"
 import type { OrientationQuaternion } from "../state/shipState"
 import { OrientationCage } from "./orientationCage"
+import { NEAR_RENDER_THRESHOLD_M } from "./starfield"
 
 // Ship-local "forward" is +X (see FixedThruster: force applied along local (1,0,0), then rotated
 // by body orientation) but three.js's camera looks down its local -Z by default. This fixed
@@ -61,12 +62,18 @@ export class FlightScene {
   private ownShip: THREE.Object3D
 
   constructor(container: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: false })
+    // Regular (linear) depth buffers only have enough precision for a few orders of magnitude
+    // between near/far — fine when the far plane was 100km (ships only), but starfield.ts now
+    // renders near planets at their true, sometimes 2,000,000km-away position too. Logarithmic
+    // depth solves that without needing a tighter near plane (which would clip the cockpit view).
+    this.renderer = new THREE.WebGLRenderer({ antialias: false, logarithmicDepthBuffer: true })
     this.renderer.setPixelRatio(1)
     this.renderer.setSize(window.innerWidth, window.innerHeight)
     container.appendChild(this.renderer.domElement)
 
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100000)
+    // Far plane padded past NEAR_RENDER_THRESHOLD_M so a body doesn't get clipped right at the
+    // real-vs-skybox cutover — see starfield.ts.
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, NEAR_RENDER_THRESHOLD_M * 1.5)
 
     // Low fill light only — the real "sun" now comes from Starfield, driven by whatever
     // star the SystemMap scan actually finds nearby, so lighting reflects where we are.

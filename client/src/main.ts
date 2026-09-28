@@ -379,8 +379,10 @@ function startGame(): void {
       systemPanel.update(shipPosition, entries)
       radarPanel.update(shipPosition, contacts)
 
-      // Radar contacts are close enough (10km, radar.rs's RADAR_SCAN_DISTANCE) to render at real
-      // scale/position in the 3D scene too, unlike SystemMap's light-year-away skybox entries.
+      // Radar contacts always render at real scale/position (10km, radar.rs's
+      // RADAR_SCAN_DISTANCE — always well within starfield.ts's NEAR_RENDER_THRESHOLD_M).
+      // SystemMap entries get the same treatment conditionally, inside starfield.update() itself,
+      // since most of them (other systems' stars, light-years away) can't render to true scale.
       // Computed once and reused for the on-screen direction markers below, so a contact's label
       // lines up exactly with its rendered position instead of being derived independently.
       const contactPositions = contacts.map(([entityId, position, size]) => {
