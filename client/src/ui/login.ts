@@ -1,4 +1,5 @@
 import { ionClient } from "../api/client"
+import { getControlMode, setControlMode } from "../state/controlMode"
 
 /** Parses a pasted "LOGIN id component pass" (LOGIN keyword optional) into its three fields. */
 function parseLoginString(text: string): { shipId: string; component: string; password: string } | null {
@@ -19,12 +20,21 @@ export function renderLogin(container: HTMLElement, onSuccess: () => void): void
       <label>Component <input name="component" required autocomplete="off" value="core" /></label>
       <label>Password <input name="password" type="password" required /></label>
       <button type="submit">Connetti</button>
+      <button type="button" id="mode-toggle" class="mode-toggle"></button>
       <p class="login-error" id="login-error"></p>
     </form>
   `
 
   const form = container.querySelector<HTMLFormElement>("#login-form")!
   const errorEl = container.querySelector<HTMLParagraphElement>("#login-error")!
+  const modeToggle = container.querySelector<HTMLButtonElement>("#mode-toggle")!
+
+  const modeLabel = () => (getControlMode() === "tactical" ? "Modalità: Tattica (mouse) — clicca per Cockpit" : "Modalità: Cockpit — clicca per Tattica (mouse)")
+  modeToggle.textContent = modeLabel()
+  modeToggle.addEventListener("click", () => {
+    setControlMode(getControlMode() === "tactical" ? "cockpit" : "tactical")
+    modeToggle.textContent = modeLabel()
+  })
   const shipIdInput = form.elements.namedItem("shipId") as HTMLInputElement
   const componentInput = form.elements.namedItem("component") as HTMLInputElement
   const passwordInput = form.elements.namedItem("password") as HTMLInputElement

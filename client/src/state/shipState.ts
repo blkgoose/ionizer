@@ -52,6 +52,12 @@ export function readOrientation(entity: ShipEntity): OrientationQuaternion | nul
   return null
 }
 
+/** body.size — entity.rs's contact_radius uses this /2 as the collider radius; here, the ship's own real diameter, meters. */
+export function readShipSize(entity: ShipEntity): number | null {
+  const size = (entity as any)?.body?.size
+  return typeof size === "number" ? size : null
+}
+
 export function readVelocity(entity: ShipEntity): Vector3 | null {
   const v = (entity as any)?.body?.position?.velocity
   if (v && typeof v.x === "number") return v as Vector3
@@ -102,6 +108,63 @@ export function readFuelLevels(entity: ShipEntity, modules: ModuleRef[]): FuelLe
   return modules
     .filter((m) => m.type === "FuelCell")
     .map((m) => ({ moduleId: m.module_id, fuelKg: readModuleField(entity, m.module_id, "fuel_kg") ?? 0 }))
+}
+
+// SteeringThruster.yaw is the mount's fixed firing direction in the ship's local frame, degrees,
+// 0 = same as a FixedThruster (forward). Bucketing to the nearest cardinal tells us what role a
+// given mount actually plays instead of guessing from list order. Shared by manual propulsion
+// (propulsion.ts) and the autopilot (autopilot.ts) so both agree on which thruster does what.
+const YAW_BUCKETS = [0, 90, 180, 270] as const
+type YawBucket = (typeof YAW_BUCKETS)[number]
+
+function nearestYawBucket(yaw: number): YawBucket {
+  const normalized = ((yaw % 360) + 360) % 360
+  let best: YawBucket = 0
+  let bestDist = Infinity
+  for (const bucket of YAW_BUCKETS) {
+    const dist = Math.min(Math.abs(normalized - bucket), 360 - Math.abs(normalized - bucket))
+    if (dist < bestDist) {
+      bestDist = dist
+      best = bucket
+    }
+  }
+  return best
+}
+
+export interface ThrusterGroups {
+  rcs: ModuleRef[]
+  fixed: ModuleRef[]
+  retro: ModuleRef[]
+  lateralQ: ModuleRef[]
+  lateralE: ModuleRef[]
+}
+
+export function classifyThrusters(entity: ShipEntity | null, modules: ModuleRef[]): ThrusterGroups {
+  const groups: ThrusterGroups = { rcs: [], fixed: [], retro: [], lateralQ: [], lateralE: [] }
+
+  for (const m of modules) {
+    if (m.type === "RcsThruster") groups.rcs.push(m)
+    else if (m.type === "FixedThruster") groups.fixed.push(m)
+    else if (m.type === "SteeringThruster") {
+      const yaw = entity ? (readModuleField(entity, m.module_id, "yaw") ?? 0) : 0
+      switch (nearestYawBucket(yaw)) {
+        case 180:
+          groups.retro.push(m)
+          break
+        case 90:
+          groups.lateralQ.push(m)
+          break
+        case 270:
+          groups.lateralE.push(m)
+          break
+        default:
+          // yaw ~0: fires the same direction as a FixedThruster, no lateral/retro role to assign.
+          break
+      }
+    }
+  }
+
+  return groups
 }
 
 export function readModules(entity: ShipEntity): ModuleRef[] {

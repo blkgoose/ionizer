@@ -21,6 +21,7 @@ export class FlightScene {
   readonly camera: THREE.PerspectiveCamera
   private contacts = new Map<string, THREE.Object3D>()
   private orientationCage: OrientationCage
+  private ownShip: THREE.Object3D
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: false })
@@ -36,7 +37,41 @@ export class FlightScene {
 
     this.orientationCage = new OrientationCage(this.scene)
 
+    // We ARE the camera in cockpit mode, so this only needs to be visible in tactical mode
+    // (see setOwnShipVisible) — otherwise it'd just render inside the camera's own origin point.
+    this.ownShip = this.buildOwnShipMesh()
+    this.ownShip.visible = false
+    this.scene.add(this.ownShip)
+
     window.addEventListener("resize", () => this.onResize())
+  }
+
+  private buildOwnShipMesh(): THREE.Object3D {
+    // Unit cone (diameter 1, height 1) pointing along +Y by default; rotated so it points along
+    // ship-local forward (+X), then uniformly scaled to the real size reported by GET (see
+    // setOwnShipSize) so it's not just an arbitrarily-sized placeholder.
+    const body = new THREE.Mesh(
+      new THREE.ConeGeometry(0.5, 1, 8),
+      new THREE.MeshLambertMaterial({ color: 0x66ccff, flatShading: true }),
+    )
+    body.rotation.z = -Math.PI / 2
+    const group = new THREE.Group()
+    group.add(body)
+    return group
+  }
+
+  setOwnShipVisible(visible: boolean): void {
+    this.ownShip.visible = visible
+  }
+
+  setOwnShipTransform(position: [number, number, number], orientation: OrientationQuaternion | null): void {
+    this.ownShip.position.set(...position)
+    if (orientation) this.ownShip.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.q)
+  }
+
+  /** `sizeM` is the ship's real diameter, as reported by GET's body.size. */
+  setOwnShipSize(sizeM: number): void {
+    this.ownShip.scale.setScalar(Math.max(0.1, sizeM))
   }
 
   private onResize(): void {
@@ -79,8 +114,15 @@ export class FlightScene {
           new THREE.MeshBasicMaterial({ color: 0xffffff }),
         )
         tip.position.set(radius, 0, 0)
+        // Invisible, oversized hit-target: the visual body can be too small on screen (especially
+        // at tactical-camera zoom) to reliably click — material.visible = false skips rendering
+        // but three.js's raycaster still tests the geometry.
+        const hitTarget = new THREE.Mesh(
+          new THREE.SphereGeometry(Math.max(30, radius * 4), 6, 6),
+          new THREE.MeshBasicMaterial({ visible: false }),
+        )
         group = new THREE.Group()
-        group.add(body, tip)
+        group.add(body, tip, hitTarget)
         this.scene.add(group)
         this.contacts.set(contact.entityId, group)
       }
@@ -93,6 +135,11 @@ export class FlightScene {
         this.contacts.delete(id)
       }
     }
+  }
+
+  /** For tactical-mode raycasting: each live radar contact's clickable object, tagged by entity id. */
+  getContactPickables(): { entityId: string; object: THREE.Object3D }[] {
+    return Array.from(this.contacts, ([entityId, object]) => ({ entityId, object }))
   }
 
   render(): void {

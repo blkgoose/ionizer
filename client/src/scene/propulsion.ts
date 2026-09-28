@@ -1,28 +1,8 @@
 import { ionClient } from "../api/client"
 import type { ShipEntity } from "../api/types"
-import { readModuleActivation, readModuleField, type ModuleRef } from "../state/shipState"
+import { classifyThrusters, readModuleActivation, type ModuleRef } from "../state/shipState"
 
 const ACCEL_STEP = 10
-
-// SteeringThruster.yaw is the mount's fixed firing direction in the ship's local frame, degrees,
-// 0 = same as a FixedThruster (forward). Bucketing to the nearest cardinal tells us what role a
-// given mount actually plays instead of guessing from list order.
-const YAW_BUCKETS = [0, 90, 180, 270] as const
-type YawBucket = (typeof YAW_BUCKETS)[number]
-
-function nearestYawBucket(yaw: number): YawBucket {
-  const normalized = ((yaw % 360) + 360) % 360
-  let best: YawBucket = 0
-  let bestDist = Infinity
-  for (const bucket of YAW_BUCKETS) {
-    const dist = Math.min(Math.abs(normalized - bucket), 360 - Math.abs(normalized - bucket))
-    if (dist < bestDist) {
-      bestDist = dist
-      best = bucket
-    }
-  }
-  return best
-}
 
 /**
  * Control scheme:
@@ -46,37 +26,22 @@ export class IntelligentPropulsion {
   private lastSent = { yaw: 0, pitch: 0, roll: 0, steeringQ: 0, steeringE: 0 }
   private accel = 0 // signed: >0 drives fixed thrusters forward, <0 drives retro thrusters
 
+  // Manual keyboard control yields the thrusters to the autopilot while this is false — see
+  // autopilot.ts, which flips it off on engage and back on on disengage/abort.
+  enabled = true
+
   constructor() {
     window.addEventListener("keydown", (e) => this.onKey(e, true))
     window.addEventListener("keyup", (e) => this.onKey(e, false))
   }
 
   setModules(modules: ModuleRef[], entity: ShipEntity | null): void {
-    this.rcsThrusters = modules.filter((m) => m.type === "RcsThruster")
-    this.fixedThrusters = modules.filter((m) => m.type === "FixedThruster")
-
-    const steering = modules.filter((m) => m.type === "SteeringThruster")
-    this.retroThrusters = []
-    this.lateralQThrusters = []
-    this.lateralEThrusters = []
-
-    for (const t of steering) {
-      const yaw = entity ? (readModuleField(entity, t.module_id, "yaw") ?? 0) : 0
-      switch (nearestYawBucket(yaw)) {
-        case 180:
-          this.retroThrusters.push(t)
-          break
-        case 90:
-          this.lateralQThrusters.push(t)
-          break
-        case 270:
-          this.lateralEThrusters.push(t)
-          break
-        default:
-          // yaw ~0: fires the same direction as a FixedThruster, no lateral/retro role to assign.
-          break
-      }
-    }
+    const groups = classifyThrusters(entity, modules)
+    this.rcsThrusters = groups.rcs
+    this.fixedThrusters = groups.fixed
+    this.retroThrusters = groups.retro
+    this.lateralQThrusters = groups.lateralQ
+    this.lateralEThrusters = groups.lateralE
   }
 
   /** Keeps the acceleration baseline honest against the server's own values between our own bumps. */
@@ -90,6 +55,7 @@ export class IntelligentPropulsion {
   }
 
   private onKey(event: KeyboardEvent, pressed: boolean): void {
+    if (!this.enabled) return
     const key = event.key.toLowerCase()
 
     if (key === "shift") {
@@ -121,6 +87,7 @@ export class IntelligentPropulsion {
 
   /** Called on a fixed tick; only issues SET when a burst axis's value actually changed. */
   async tick(): Promise<void> {
+    if (!this.enabled) return
     const shiftHeld = this.keyDown.shift
 
     // A/D and W/S are swapped from what you'd naively expect (A/D drive pitch, W/S drive yaw) —

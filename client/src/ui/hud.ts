@@ -37,7 +37,7 @@ export class Hud {
   private lastVelocity: Vector3 | null = null
   private lastTimestamp: number | null = null
 
-  constructor(container: HTMLElement, onLogout: () => void) {
+  constructor(container: HTMLElement, onLogout: () => void, onFullStop: () => void) {
     const el = document.createElement("div")
     el.className = "hud"
 
@@ -67,6 +67,13 @@ export class Hud {
     logoutBtn.style.pointerEvents = "auto"
     logoutBtn.addEventListener("click", onLogout)
     el.appendChild(logoutBtn)
+
+    const fullStopBtn = document.createElement("button")
+    fullStopBtn.className = "hud-panel hud-full-stop"
+    fullStopBtn.textContent = "Full stop"
+    fullStopBtn.style.pointerEvents = "auto"
+    fullStopBtn.addEventListener("click", onFullStop)
+    el.appendChild(fullStopBtn)
 
     container.appendChild(el)
   }
