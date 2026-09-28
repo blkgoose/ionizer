@@ -41,12 +41,25 @@ const POINTING_ANGLE_TOLERANCE_DEG = 3
 const POINTING_RATE_TOLERANCE_DEG_S = 1
 const POINTING_SETTLE_MS = 400
 
-// Neither of these is measured from the ship's actual mass/thrust (not exposed by GET) — they're
-// a conservative assumed deceleration capability, used only to decide *when* to flip and start
-// braking. BRAKE_MARGIN pads that estimate so the flip happens a bit early rather than late and
-// overshooting.
+// ASSUMED_MAX_DECEL_MPS2 is now only a fallback before any real measurement exists: real thrust
+// capability varies enormously by ship (mass, thruster loadout, remaining fuel all change it), so
+// a single guessed constant is either wildly conservative (slow, "overcorrecting") or wildly
+// optimistic (overshoot/collision) depending which ship it's flying. ACCEL_SMOOTHING-driven
+// live measurement (see measureAccel() below) replaces it with the ship's own realized
+// acceleration as soon as there's been a full-throttle burn to measure, the same "don't guess,
+// measure it" approach RcsCalibrator already takes for RCS torque authority.
 const ASSUMED_MAX_DECEL_MPS2 = 2
 const BRAKE_MARGIN = 1.3
+// EMA smoothing for the live thrust-accel measurement; slow enough to reject single-tick noise
+// (velocity readback jitter, a tick landing right at a phase transition) but fast enough to track
+// mass dropping as fuel burns off over a single flight.
+const ACCEL_SMOOTHING = 0.15
+// Only trust a sample as "this was a real full-throttle burn", not a partial command or a stale
+// reading spanning a phase transition, dropout, etc.
+const ACCEL_SAMPLE_MIN_FORWARD_PCT = 80
+const ACCEL_SAMPLE_MAX_DT_S = 0.3
+const ACCEL_SAMPLE_MIN_MPS2 = 0.01
+const ACCEL_SAMPLE_MAX_MPS2 = 100
 
 // The brake flip isn't instant: the ship has to rotate ~180° to retrograde and let the rate loop
 // settle before the burn is actually effective, and it keeps coasting at closingSpeed the whole
@@ -144,6 +157,12 @@ export class Autopilot {
   private settledSinceMs: number | null = null
   // When the current phase was entered — used by stoppingBurner's fixed dwell.
   private phaseEnteredAtMs = 0
+  // Live-measured main-engine acceleration (m/s^2), replacing ASSUMED_MAX_DECEL_MPS2 once
+  // available — see measureAccel().
+  private measuredAccel: number | null = null
+  private prevAccelSampleAtMs = 0
+  private prevClosingSpeedForAccel = 0
+  private prevForward = 0
 
   setModules(modules: ModuleRef[], entity: ShipEntity | null): void {
     this.thrusters = classifyThrusters(entity, modules)
@@ -215,6 +234,31 @@ export class Autopilot {
     return nowMs - this.settledSinceMs >= POINTING_SETTLE_MS
   }
 
+  /**
+   * Live-measures the main engine's realized acceleration from how much closingSpeed actually
+   * changed since the last tick, given last tick's forward command — a direct measurement instead
+   * of a guessed constant, since real thrust-to-mass varies per ship (and even per flight, as fuel
+   * burns off). Only trusts samples that span a real near-full-throttle burn with no phase change
+   * or dropout in between (see the ACCEL_SAMPLE_* gates), and EMA-smooths across the ones that pass.
+   */
+  private measureAccel(closingSpeed: number, forward: number, nowMs: number): void {
+    const dtS = (nowMs - this.prevAccelSampleAtMs) / 1000
+    if (
+      this.prevAccelSampleAtMs !== 0 &&
+      dtS > 0 &&
+      dtS <= ACCEL_SAMPLE_MAX_DT_S &&
+      this.prevForward >= ACCEL_SAMPLE_MIN_FORWARD_PCT
+    ) {
+      const realized = (closingSpeed - this.prevClosingSpeedForAccel) / dtS
+      if (realized >= ACCEL_SAMPLE_MIN_MPS2 && realized <= ACCEL_SAMPLE_MAX_MPS2) {
+        this.measuredAccel = this.measuredAccel === null ? realized : this.measuredAccel + ACCEL_SMOOTHING * (realized - this.measuredAccel)
+      }
+    }
+    this.prevAccelSampleAtMs = nowMs
+    this.prevClosingSpeedForAccel = closingSpeed
+    this.prevForward = forward
+  }
+
   private resetForEngage(): void {
     this.lastSampleAtMs = 0
     this.lastCommand = { yaw: 0, pitch: 0, roll: 0 }
@@ -222,6 +266,8 @@ export class Autopilot {
     this.zeroPending = false
     this.calibrationAttempts = 0
     this.settledSinceMs = null
+    this.prevAccelSampleAtMs = 0
+    this.prevForward = 0
     if (!this.tryUseCachedCalibration()) this.startCalibration()
   }
 
@@ -415,13 +461,14 @@ export class Autopilot {
       // --- state-exit checks, using the CURRENT (pre-transition) phase's aim direction ---
       const currentAim = aimFor(this.phase)
       const pointingNow = currentAim ? computePointing(currentAim) : null
+      const decelEstimate = this.measuredAccel ?? ASSUMED_MAX_DECEL_MPS2
 
       switch (this.phase) {
         case "pointing":
           if (this.trackSettle(pointingNow, rates, now) && !this.pointOnly) this.enterPhase("burning", now)
           break
         case "burning": {
-          const stoppingDistance = closingSpeed > 0 ? (closingSpeed * closingSpeed) / (2 * ASSUMED_MAX_DECEL_MPS2) : 0
+          const stoppingDistance = closingSpeed > 0 ? (closingSpeed * closingSpeed) / (2 * decelEstimate) : 0
           const turnAngleDeg = THREE.MathUtils.radToDeg(worldDirection!.angleTo(retrogradeDirection))
           const maneuverTimeS = turnAngleDeg / ASSUMED_TURN_RATE_DEG_S + MANEUVER_SETTLE_S
           const coastDuringManeuver = closingSpeed > 0 ? closingSpeed * maneuverTimeS : 0
@@ -459,7 +506,7 @@ export class Autopilot {
         }
 
         if (this.phase === "burning" && pointing.angleDeg < ALIGNMENT_TOLERANCE_DEG && remaining > 0) {
-          const desiredSpeed = Math.min(MAX_CRUISE_SPEED, Math.sqrt(2 * ASSUMED_MAX_DECEL_MPS2 * remaining))
+          const desiredSpeed = Math.min(MAX_CRUISE_SPEED, Math.sqrt(2 * decelEstimate * remaining))
           const speedError = desiredSpeed - closingSpeed
           if (speedError > SPEED_DEADBAND) forward = Math.min(100, speedError * SPEED_GAIN)
         } else if (this.phase === "stopping") {
@@ -467,6 +514,8 @@ export class Autopilot {
         }
       }
     }
+
+    if (this.phase === "burning" || this.phase === "stopping") this.measureAccel(closingSpeed, forward, now)
 
     this.lastCommand = commands
     const jobs: Promise<void>[] = []
