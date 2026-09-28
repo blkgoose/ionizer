@@ -77,12 +77,20 @@ export class Starfield {
       if (isNear) {
         // Real position, real size — same treatment as radar contacts (scene.ts), just without a
         // heading cone (bodies don't have one to show).
+        //
+        // DoubleSide matters here specifically: "arrived" only requires distance-to-*surface* to
+        // reach the arrival radius (autopilot.ts), and distance-to-*center* (used for isNear/the
+        // real position above) can already be smaller than the body's own radius by then — i.e.
+        // the ship/camera ends up inside the sphere's geometry. Three.js's default FrontSide
+        // culls every face as seen from inside a convex shell (nothing left facing the camera),
+        // making the whole sphere both invisible and unraycastable — exactly "doesn't render,
+        // isn't clickable" — the moment you get that close.
         const realRadius = Math.max(1, entry.diameter_m / 2)
         mesh = new THREE.Mesh(
           new THREE.SphereGeometry(realRadius, 32, 24),
           isStar
-            ? new THREE.MeshBasicMaterial({ color: 0xfff4c2 })
-            : new THREE.MeshLambertMaterial({ color: 0x6699cc, flatShading: true }),
+            ? new THREE.MeshBasicMaterial({ color: 0xfff4c2, side: THREE.DoubleSide })
+            : new THREE.MeshLambertMaterial({ color: 0x6699cc, flatShading: true, side: THREE.DoubleSide }),
         )
         mesh.position.copy(anchor).addScaledVector(direction, distance)
         // The real body is already easy to click (often filling much of the screen up close);
@@ -104,7 +112,12 @@ export class Starfield {
       }
       this.group.add(mesh)
 
-      const hitTarget = new THREE.Mesh(new THREE.SphereGeometry(hitTargetRadius, 8, 6), new THREE.MeshBasicMaterial({ visible: false }))
+      const hitTarget = new THREE.Mesh(
+        new THREE.SphereGeometry(hitTargetRadius, 8, 6),
+        // DoubleSide here too — the invisible hit-target sphere needs to stay raycastable even
+        // when the camera ends up inside it (see the near-body DoubleSide comment above).
+        new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }),
+      )
       hitTarget.position.copy(mesh.position)
       this.group.add(hitTarget)
       this.pickables.push({ entryIndex, kind: entry.kind, object: hitTarget, position: mesh.position.clone(), distanceM: distance })
