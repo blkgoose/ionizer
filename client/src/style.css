@@ -445,6 +445,68 @@ canvas {
   color: #666;
 }
 
+.point-picker-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 15vh;
+}
+
+.point-picker-modal.hidden {
+  display: none;
+}
+
+.point-picker-panel {
+  width: min(420px, 90vw);
+  max-height: 60vh;
+  background: #0a0a0a;
+  border: 1px solid #444;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.point-picker-panel h4 {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8rem;
+  color: #999;
+  border-bottom: 1px solid #333;
+}
+
+.point-picker-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  font-size: 0.8rem;
+}
+
+.point-picker-list li {
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+}
+
+.point-picker-list li:hover {
+  background: #1a1a1a;
+}
+
+.point-picker-list li.active {
+  background: #1a2a2a;
+  color: #fff;
+  border-left: 2px solid #6cf;
+}
+
+.point-picker-empty {
+  padding: 0.75rem;
+  color: #666;
+  cursor: default !important;
+}
+
 .manifest-fields {
   display: flex;
   flex-direction: column;

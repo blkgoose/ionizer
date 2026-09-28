@@ -12,6 +12,7 @@ import { OrientationPanel } from "./ui/orientationPanel"
 import { DirectionMarkers } from "./ui/directionMarkers"
 import { FpsCounter } from "./ui/fpsCounter"
 import { ContextMenu } from "./ui/contextMenu"
+import { PointPicker, type PointPickerEntry } from "./ui/pointPicker"
 import { AutopilotStatus } from "./ui/autopilotStatus"
 import { FlightScene } from "./scene/scene"
 import { Starfield } from "./scene/starfield"
@@ -345,6 +346,40 @@ function startGame(): void {
       centered,
     )
   }
+
+  /** Snapshot of every known point (system-map bodies + scanner contacts) for the Ctrl+K picker, sorted nearest-first. */
+  function buildPointPickerEntries(): PointPickerEntry[] {
+    const shipPosition = readFloatingPosition(shipStatePoller.getLatest() ?? {})
+    if (!shipPosition) return []
+
+    const bodies: PointPickerEntry[] = systemMapPoller
+      .getLatest()
+      .map((entry, entryIndex) => ({ entry, entryIndex }))
+      .filter(({ entry }) => entry.kind === "star" || entry.kind === "planet")
+      .map(({ entry, entryIndex }) => {
+        const distanceM = Math.hypot(...relativeVector(shipPosition, entry.position))
+        const icon = entry.kind === "star" ? "☉" : "●"
+        const label = entry.kind === "star" ? "stella" : "pianeta"
+        return {
+          distanceM,
+          label: `${icon} ${label} — ${formatDistance(distanceM)}`,
+          onOpen: () => showBodyMenu(0, 0, entryIndex, entry.kind, entry.position, true),
+        }
+      })
+
+    const ships: PointPickerEntry[] = radarPoller.getLatest().map(([entityId, position]) => {
+      const distanceM = Math.hypot(...relativeVector(shipPosition, position))
+      return {
+        distanceM,
+        label: `▲ ${entityId.slice(0, 8)} — ${formatDistance(distanceM)}`,
+        onOpen: () => showShipMenu(0, 0, entityId, true),
+      }
+    })
+
+    return [...bodies, ...ships].sort((a, b) => a.distanceM - b.distanceM)
+  }
+
+  new PointPicker(app, buildPointPickerEntries)
 
   systemMapPoller.start()
   radarPoller.start()
