@@ -1,8 +1,7 @@
 import * as THREE from "three"
 import { ionClient } from "../api/client"
 import type { FloatingOriginPosition, ShipEntity } from "../api/types"
-import { PidController } from "./pid"
-import { RelayAutoTuner, type PidGains } from "./relayAutoTune"
+import { axisCommand, pointingError, RCS_AXES, RcsCalibrator, type AxisGains, type AxisValues, type RcsAxis } from "./attitude"
 import {
   classifyThrusters,
   readAngularVelocity,
@@ -14,16 +13,8 @@ import {
 } from "../state/shipState"
 
 const RAD_TO_DEG = 180 / Math.PI
-const RCS_KP = 6 // pct of torque per degree of pointing error
-// No integral term: pointing is a frictionless double-integrator plant (torque -> angular accel ->
-// rate -> angle) with no steady-state disturbance torque to cancel out, so there's nothing for an
-// integral to correct — it only eats into phase margin here. Empirically this was the actual cause
-// of a *sustained* (never-settling) oscillation regardless of how P/D were tuned: a nonzero Ki on a
-// plant like this is a textbook way to induce a limit cycle. Plain PD is the standard approach for
-// spacecraft-style attitude pointing for exactly this reason.
-const RCS_KI = 0
-const RCS_KD = 8 // pct of torque per deg/s of angular rate (damps overshoot)
-const RCS_INTEGRAL_LIMIT_DEG_S = 15 // clamps the integral term itself, in degree-seconds (unused while RCS_KI is 0, kept for setGains() signature)
+const MAX_CALIBRATION_ATTEMPTS = 2
+const TIMING_SMOOTHING = 0.2
 const ALIGNMENT_TOLERANCE_DEG = 25 // only burn the main engine once pointed this close to the target heading
 const APPROACH_GAIN = 0.4 // desired closing speed per meter of remaining distance, while still accelerating
 const MAX_APPROACH_SPEED = 40 // m/s
@@ -38,16 +29,14 @@ const ASSUMED_MAX_DECEL_MPS2 = 2
 const BRAKE_MARGIN = 1.3
 
 export type AutopilotGoal = "approach" | "orbit"
-export type AutopilotPhase = "idle" | "tuning" | "cruise" | "braking"
+export type AutopilotPhase = "idle" | "calibrating" | "cruise" | "braking"
 
 /**
  * Simplified "point and burn" autopilot: no server-side flight assist exists, so this drives the
- * same thrusters a player would (RCS to point, Fixed thruster to accelerate/decelerate) via a
- * PID pointing controller per axis (see pid.ts). On every engage(), each axis first runs a brief
- * relay-feedback self-tune (see relayAutoTune.ts) against the real thrusters before switching to
- * PID — fixed gains (even scaled by thruster count) can't account for the ship's actual mass and
- * thrust authority, and this identifies them directly from the real closed-loop response instead
- * of guessing. Two phases:
+ * same thrusters a player would (RCS to point, Fixed thruster to accelerate/decelerate). Pointing
+ * uses a braking-curve controller per RCS axis (see attitude.ts); on every engage() a short RCS
+ * doublet first measures the ship's actual angular acceleration per % of command, since that
+ * depends on ship size and can't be a constant. Two phases:
  *  - cruise: point at the target and accelerate towards it (capped at MAX_APPROACH_SPEED)
  *  - brake: once the estimated stopping distance (from current closing speed) catches up with
  *    the remaining distance, flip to point retrograde (opposite the velocity vector) and burn
@@ -64,41 +53,43 @@ export class Autopilot {
   private targetRadius = 0
   private stopMode = false
   private label = ""
-  private lastTickAtMs = 0
-  private yawPid = new PidController(RCS_KP, RCS_KI, RCS_KD, 100, RCS_INTEGRAL_LIMIT_DEG_S)
-  private pitchPid = new PidController(RCS_KP, RCS_KI, RCS_KD, 100, RCS_INTEGRAL_LIMIT_DEG_S)
-  private yawTuner = new RelayAutoTuner()
-  private pitchTuner = new RelayAutoTuner()
-  private yawTuned = false
-  private pitchTuned = false
+  private calibrator = new RcsCalibrator()
+  private calibrationAttempts = 0
+  private gains: AxisGains | null = null
   private phase: AutopilotPhase = "idle"
-  // The known-safe fallback Kp, kept around to sanity-clamp whatever the relay test identifies — a
-  // noisy/short relay run can still yield a garbage (too small) amplitude estimate and therefore a
-  // wildly inflated Ku/Kp even with the hysteresis and min-amplitude guards in relayAutoTune.ts, so
-  // this is a last-resort backstop against "unstable immediately after tuning".
-  private fallbackKp = RCS_KP
+  private rcsIds = ""
+  private lastSampleAtMs = 0
+  private avgTickS = 0.066
+  private avgSetRttS = 0.05
+  private inFlight = false
+  private zeroPending = false
+  private lastCommand: AxisValues = { yaw: 0, pitch: 0, roll: 0 }
+  // Last value actually sent per module+variable, so unchanged values aren't re-sent every tick.
+  private sent = new Map<string, number>()
 
   setModules(modules: ModuleRef[], entity: ShipEntity | null): void {
     this.thrusters = classifyThrusters(entity, modules)
-
-    // Rough fallback gains, scaled for the ship's actual RCS mount count (more mounts firing in
-    // parallel means more torque authority per % activation) — only used until the relay
-    // auto-tune below identifies real gains for this ship, and never overwrites them afterwards.
-    const rcsCount = Math.max(1, this.thrusters.rcs.length)
-    const scale = 1 / rcsCount
-    this.fallbackKp = RCS_KP * scale
-    if (this.yawTuned && this.pitchTuned) return
-    if (!this.yawTuned) this.yawPid.setGains(RCS_KP * scale, RCS_KI * scale, RCS_KD * scale)
-    if (!this.pitchTuned) this.pitchPid.setGains(RCS_KP * scale, RCS_KI * scale, RCS_KD * scale)
+    const rcsIds = this.thrusters.rcs.map((t) => t.module_id).join(",")
+    if (rcsIds !== this.rcsIds) {
+      this.rcsIds = rcsIds
+      if (this.engaged) this.startCalibration()
+    }
   }
 
-  /** Caps identified gains to a sane multiple of the known-safe fallback, preserving the kd/kp ratio. */
-  private clampGains(gains: PidGains): PidGains {
-    const MAX_KP_MULTIPLE = 3
-    const cap = this.fallbackKp * MAX_KP_MULTIPLE
-    if (gains.kp <= cap) return gains
-    const scale = cap / gains.kp
-    return { kp: gains.kp * scale, ki: gains.ki * scale, kd: gains.kd * scale }
+  private startCalibration(): void {
+    this.gains = null
+    this.calibrationAttempts++
+    this.phase = "calibrating"
+    this.calibrator.start(Date.now())
+  }
+
+  private resetForEngage(): void {
+    this.lastSampleAtMs = 0
+    this.lastCommand = { yaw: 0, pitch: 0, roll: 0 }
+    this.sent.clear()
+    this.zeroPending = false
+    this.calibrationAttempts = 0
+    this.startCalibration()
   }
 
   get engaged(): boolean {
@@ -127,16 +118,8 @@ export class Autopilot {
     this.arrivalRadius = arrivalRadius
     this.targetRadius = targetRadiusM
     this.label = label
-    this.lastTickAtMs = 0
-    this.yawPid.reset()
-    this.pitchPid.reset()
-    // Re-identify gains every engage: a different target direction exercises the same thrusters
-    // but a fresh relay test is cheap and avoids trusting a tune from a very different maneuver.
-    this.yawTuned = false
-    this.pitchTuned = false
-    this.phase = "tuning"
-    this.yawTuner.start(Date.now())
-    this.pitchTuner.start(Date.now())
+    this.stopMode = false
+    this.resetForEngage()
   }
 
   /** Null out all velocity in place — points retrograde and burns until closing speed reaches ~0, then auto-disengages. */
@@ -146,14 +129,7 @@ export class Autopilot {
     this.targetRadius = 0
     this.stopMode = true
     this.label = "Full stop"
-    this.lastTickAtMs = 0
-    this.yawPid.reset()
-    this.pitchPid.reset()
-    this.yawTuned = false
-    this.pitchTuned = false
-    this.phase = "tuning"
-    this.yawTuner.start(Date.now())
-    this.pitchTuner.start(Date.now())
+    this.resetForEngage()
   }
 
   disengage(): void {
@@ -161,15 +137,31 @@ export class Autopilot {
     this.stopMode = false
     this.label = ""
     this.phase = "idle"
-    this.yawPid.reset()
-    this.pitchPid.reset()
+    this.gains = null
+    // A tick's SETs may still be in flight; zeroing now could land before them and leave thrusters
+    // firing, so defer until that tick completes.
+    if (this.inFlight) this.zeroPending = true
+    else this.sendZeros()
+  }
+
+  private sendZeros(): void {
+    this.zeroPending = false
+    this.sent.clear()
+    this.lastCommand = { yaw: 0, pitch: 0, roll: 0 }
     for (const t of this.thrusters.rcs) {
-      void ionClient.set(t.module_id, "yaw", 0)
-      void ionClient.set(t.module_id, "pitch", 0)
+      for (const axis of RCS_AXES) void ionClient.set(t.module_id, axis, 0)
     }
     for (const t of [...this.thrusters.fixed, ...this.thrusters.retro, ...this.thrusters.lateralQ, ...this.thrusters.lateralE]) {
       void ionClient.set(t.module_id, "activation", 0)
     }
+  }
+
+  private queueSet(jobs: Promise<void>[], moduleId: string, variable: string, value: number): void {
+    const rounded = Math.round(value * 10) / 10
+    const key = `${moduleId}:${variable}`
+    if (this.sent.get(key) === rounded) return
+    this.sent.set(key, rounded)
+    jobs.push(ionClient.set(moduleId, variable, rounded))
   }
 
   /** Called on every ship-state poll (~15/s) — needs fresh position/orientation/velocity anyway. */
@@ -233,62 +225,60 @@ export class Autopilot {
 
     const inverseOrientation = new THREE.Quaternion(orientation.x, orientation.y, orientation.z, orientation.q).invert()
     const localDir = pointDirection.clone().applyQuaternion(inverseOrientation)
+    const pointing = pointingError(localDir)
 
-    // Yaw rotates about local Z, pitch about local Y — because X→Y→Z is the right-handed cyclic
-    // order, a rotation about Z couples (x,y) with the opposite sign parity of a rotation about Y
-    // coupling (z,x). Concretely: d(atan2(y,x))/dt = -yawRate, but d(asin(z))/dt = +pitchRate (not
-    // -pitchRate) for the same physical sense of "rotate to reduce the error". Using a plain
-    // asin(z) here without the negation made the pitch loop positive-feedback — any pitch error
-    // grew instead of shrinking, saturating the RCS and spinning continuously ("a trottola") no
-    // matter the gains, since no amount of tuning fixes a backwards sign.
-    const yawErrorDeg = Math.atan2(localDir.y, localDir.x) * RAD_TO_DEG
-    const pitchErrorDeg = -Math.asin(Math.max(-1, Math.min(1, localDir.z))) * RAD_TO_DEG
-    const alignmentErrorDeg = Math.acos(Math.max(-1, Math.min(1, localDir.x))) * RAD_TO_DEG
-
-    const yawRateDeg = angularVelocity.z * RAD_TO_DEG
-    const pitchRateDeg = angularVelocity.y * RAD_TO_DEG
+    // Body-frame rates, right-handed: +Z (yaw) swings the nose towards +Y and +Y (pitch) towards −Z,
+    // so a positive rate reduces a positive pointingError() component on both axes.
+    const rates: AxisValues = {
+      yaw: angularVelocity.z * RAD_TO_DEG,
+      pitch: angularVelocity.y * RAD_TO_DEG,
+      roll: angularVelocity.x * RAD_TO_DEG,
+    }
 
     const now = Date.now()
-    const dtSeconds = this.lastTickAtMs === 0 ? 0 : Math.min(0.5, (now - this.lastTickAtMs) / 1000)
-    this.lastTickAtMs = now
+    if (this.lastSampleAtMs !== 0) {
+      const dt = Math.min(0.5, (now - this.lastSampleAtMs) / 1000)
+      this.avgTickS += TIMING_SMOOTHING * (dt - this.avgTickS)
+    }
+    this.lastSampleAtMs = now
+    if (this.phase === "calibrating") this.calibrator.record(now, rates)
 
-    let yawCmd: number
-    if (!this.yawTuned) {
-      const result = this.yawTuner.step(yawErrorDeg, now)
-      yawCmd = result.command
-      if (result.done) {
-        this.yawTuned = true
-        if (result.gains) {
-          const g = this.clampGains(result.gains)
-          this.yawPid.setGains(g.kp, g.ki, g.kd)
+    // Ticks are fired without awaiting (main.ts), so skip while the previous SETs are still in
+    // flight rather than letting stale commands race newer ones to the server.
+    if (this.inFlight) return
+
+    let commands: AxisValues = { yaw: 0, pitch: 0, roll: 0 }
+    if (this.phase === "calibrating") {
+      const probe = this.calibrator.command(now)
+      if (!probe.done) {
+        commands = probe.values
+      } else {
+        const gains = this.calibrator.gains()
+        if (gains.yaw !== null && gains.pitch !== null) {
+          this.gains = gains
+        } else if (this.calibrationAttempts < MAX_CALIBRATION_ATTEMPTS) {
+          this.startCalibration()
+        } else {
+          console.warn("Autopilot: RCS calibration failed, yaw/pitch did not respond consistently", gains)
+          this.disengage()
+          return
         }
       }
-    } else {
-      yawCmd = this.yawPid.update(yawErrorDeg, yawRateDeg, dtSeconds)
     }
 
-    let pitchCmd: number
-    if (!this.pitchTuned) {
-      const result = this.pitchTuner.step(pitchErrorDeg, now)
-      pitchCmd = result.command
-      if (result.done) {
-        this.pitchTuned = true
-        if (result.gains) {
-          const g = this.clampGains(result.gains)
-          this.pitchPid.setGains(g.kp, g.ki, g.kd)
-        }
+    const gains = this.gains
+    if (gains) {
+      const delayS = this.avgSetRttS + this.avgTickS
+      const errors: AxisValues = { yaw: pointing.yawDeg, pitch: pointing.pitchDeg, roll: 0 }
+      for (const axis of RCS_AXES) {
+        const gain = gains[axis as RcsAxis]
+        commands[axis] = gain === null ? 0 : axisCommand(errors[axis], rates[axis], gain, this.lastCommand[axis], delayS)
       }
-    } else {
-      pitchCmd = this.pitchPid.update(pitchErrorDeg, pitchRateDeg, dtSeconds)
+      this.phase = braking ? "braking" : "cruise"
     }
 
-    this.phase = !this.yawTuned || !this.pitchTuned ? "tuning" : braking ? "braking" : "cruise"
-
-    // The relay test deliberately swings the ship off-target while it runs, so gate the main
-    // engine on both axes being done tuning as well as actually aligned — otherwise a burn could
-    // fire mid-swing, right as the relay happens to cross through alignment.
     let forward = 0
-    if (this.yawTuned && this.pitchTuned && alignmentErrorDeg < ALIGNMENT_TOLERANCE_DEG) {
+    if (gains && pointing.angleDeg < ALIGNMENT_TOLERANCE_DEG) {
       if (braking) {
         forward = closingSpeed > SPEED_DEADBAND ? 100 : 0
       } else if (remaining > 0) {
@@ -298,15 +288,27 @@ export class Autopilot {
       }
     }
 
+    this.lastCommand = commands
     const jobs: Promise<void>[] = []
     for (const t of this.thrusters.rcs) {
-      jobs.push(ionClient.set(t.module_id, "yaw", yawCmd))
-      jobs.push(ionClient.set(t.module_id, "pitch", pitchCmd))
-      jobs.push(ionClient.set(t.module_id, "roll", 0))
+      for (const axis of RCS_AXES) this.queueSet(jobs, t.module_id, axis, commands[axis])
     }
-    for (const t of this.thrusters.fixed) jobs.push(ionClient.set(t.module_id, "activation", forward))
-    for (const t of this.thrusters.retro) jobs.push(ionClient.set(t.module_id, "activation", 0))
-    await Promise.all(jobs)
+    for (const t of this.thrusters.fixed) this.queueSet(jobs, t.module_id, "activation", forward)
+    for (const t of this.thrusters.retro) this.queueSet(jobs, t.module_id, "activation", 0)
+    if (jobs.length === 0) return
+
+    this.inFlight = true
+    const sentAt = performance.now()
+    try {
+      await Promise.all(jobs)
+      this.avgSetRttS += TIMING_SMOOTHING * (Math.min(1, (performance.now() - sentAt) / 1000) - this.avgSetRttS)
+    } catch (error) {
+      this.sent.clear()
+      console.warn("Autopilot: SET failed, resending everything next tick", error)
+    } finally {
+      this.inFlight = false
+      if (this.zeroPending) this.sendZeros()
+    }
   }
 }
 
