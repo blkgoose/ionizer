@@ -31,6 +31,15 @@ const SPEED_DEADBAND = 0.3 // m/s — inside this, don't bother thrusting
 const ASSUMED_MAX_DECEL_MPS2 = 2
 const BRAKE_MARGIN = 1.3
 
+// The brake flip isn't instant: the ship has to rotate ~180° to retrograde and let the rate loop
+// settle before the burn is actually effective, and it keeps coasting at closingSpeed the whole
+// time. ASSUMED_TURN_RATE_DEG_S is a conservative average turn rate (well under attitude.ts's
+// MAX_RATE_DEG_S, to account for ramp-up/down) used only to estimate how much distance that
+// coasting eats up — not to control the turn itself. MANEUVER_SETTLE_S pads that further for the
+// rate loop to kill residual spin once pointed.
+const ASSUMED_TURN_RATE_DEG_S = 20
+const MANEUVER_SETTLE_S = 1.5
+
 export type AutopilotGoal = "approach" | "orbit"
 export type AutopilotPhase = "idle" | "calibrating" | "cruise" | "braking"
 
@@ -235,16 +244,22 @@ export class Autopilot {
       closingSpeed = velocityVec.dot(worldDirection) // positive = approaching the target
 
       const stoppingDistance = closingSpeed > 0 ? (closingSpeed * closingSpeed) / (2 * ASSUMED_MAX_DECEL_MPS2) : 0
-      braking = closingSpeed > SPEED_DEADBAND && stoppingDistance * BRAKE_MARGIN >= remaining
+
+      // How far the flip-to-retrograde maneuver itself would coast before the burn can start:
+      // the turn angle is close to 180° whenever the ship's been tracking the target well (cruise
+      // points at the target, braking points opposite the velocity vector), but computing the
+      // actual angle between them handles cases with real lateral drift too.
+      const retrogradeDirection = velocityVec.lengthSq() > 0 ? velocityVec.clone().normalize().negate() : worldDirection.clone().negate()
+      const turnAngleDeg = THREE.MathUtils.radToDeg(worldDirection.angleTo(retrogradeDirection))
+      const maneuverTimeS = turnAngleDeg / ASSUMED_TURN_RATE_DEG_S + MANEUVER_SETTLE_S
+      const coastDuringManeuver = closingSpeed > 0 ? closingSpeed * maneuverTimeS : 0
+
+      braking = closingSpeed > SPEED_DEADBAND && stoppingDistance * BRAKE_MARGIN + coastDuringManeuver >= remaining
 
       // Cruise: face the target and accelerate towards it. Brake: flip to face retrograde (the way
       // we're actually moving, reversed) and fire the very same engines to cancel that velocity —
       // this is the "rotate the ship, then reactivate the engines" maneuver.
-      pointDirection = braking
-        ? velocityVec.lengthSq() > 0
-          ? velocityVec.clone().normalize().negate()
-          : worldDirection.clone().negate()
-        : worldDirection
+      pointDirection = braking ? retrogradeDirection : worldDirection
     }
 
     const inverseOrientation = new THREE.Quaternion(orientation.x, orientation.y, orientation.z, orientation.q).invert()
