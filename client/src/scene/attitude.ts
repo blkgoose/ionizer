@@ -21,6 +21,14 @@ const BRAKING_ACCEL_FRACTION = 0.6
 const MAX_RATE_DEG_S = 45
 const MIN_RATE_LOOP_TIME_S = 0.15
 const COMMAND_DEADBAND = 0.1
+// How long a pointing slew should take to settle, independent of link latency. Previously the
+// slew's own target-rate gain (p below) was derived straight from the fast inner rate loop's
+// timing, so any sizeable error commanded close to MAX_RATE_DEG_S immediately ("full blast") —
+// fine for tracking a commanded rate precisely, but not for the outer decision of how hard to
+// turn towards the target in the first place, which is what was causing overshoot-prone,
+// too-aggressive slews. Settling is ~3 time constants for an exponential (linear-gain) approach.
+const POINTING_SETTLE_TIME_S = 12
+const POINTING_SLEW_P = 3 / POINTING_SETTLE_TIME_S
 
 /**
  * Desired rate towards the target: linear (gain p) close in, then √(2·a·|err|) once that would need
@@ -47,8 +55,7 @@ export function axisCommand(errDeg: number, rateDegS: number, gain: number, last
   const predictedErr = errDeg - ((rateDegS + predictedRate) / 2) * delayS
 
   const rateLoopTimeS = Math.max(MIN_RATE_LOOP_TIME_S, 2 * delayS)
-  const p = 1 / (3 * rateLoopTimeS)
-  const desiredRate = brakingCurveRate(predictedErr, BRAKING_ACCEL_FRACTION * maxAccel, p)
+  const desiredRate = brakingCurveRate(predictedErr, BRAKING_ACCEL_FRACTION * maxAccel, POINTING_SLEW_P)
 
   const desiredAccel = (desiredRate - predictedRate) / rateLoopTimeS
   const command = Math.max(-MAX_COMMAND, Math.min(MAX_COMMAND, desiredAccel / gain))
