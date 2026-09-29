@@ -75,13 +75,24 @@ export function pointingError(localDir: { x: number; y: number; z: number }): { 
 }
 
 const MIN_PROBE_SEGMENT_MS = 600
-const MAX_PROBE_SEGMENT_MS = 2000
+// Heavy ships / weak RCS loadouts can take a while to move the rate by PROBE_RATE_CHANGE_DEG_S —
+// this used to cap at 2000ms, which was routinely too short for anything but a light, well-RCS'd
+// ship: the segment ended before it ever cleared the noise floor, so gain() saw a near-flat slope,
+// fell under MIN_ACCEL_DEG_S2, and calibration failed (silently disengaging the autopilot — see
+// MAX_CALIBRATION_ATTEMPTS in autopilot.ts). Longer headroom costs a slower calibration, not a
+// worse one.
+const MAX_PROBE_SEGMENT_MS = 6000
 // An axis's + segment keeps going until its rate has moved this much (weak ships need longer to rise
 // above measurement noise); its − segment then mirrors that duration so the rate ends where it began.
-const PROBE_RATE_CHANGE_DEG_S = 3
+// Lower than before so a genuinely weak-but-real response still clears the bar well inside the
+// (now longer) MAX_PROBE_SEGMENT_MS window, instead of needing a big rate swing to end the segment early.
+const PROBE_RATE_CHANGE_DEG_S = 1.5
 const MIN_FIT_SAMPLES = 3
-const MIN_ACCEL_DEG_S2 = 0.05 // at full command; below this the axis is treated as unresponsive
-const MAX_SEGMENT_MISMATCH = 3 // + and − segment accelerations must agree within this ratio
+// At full command; below this the axis is treated as unresponsive. Lowered alongside
+// PROBE_RATE_CHANGE_DEG_S so a real but weak torque authority (heavy ship, small RCS) still counts
+// instead of being indistinguishable from noise.
+const MIN_ACCEL_DEG_S2 = 0.02
+const MAX_SEGMENT_MISMATCH = 5 // + and − segment accelerations must agree within this ratio
 
 interface Sample {
   t: number

@@ -17,7 +17,10 @@ import { calibrationMatches, loadAutopilotCalibration, saveAutopilotCalibration 
 import { saveAutopilotPhase } from "../state/autopilotPhase"
 
 const RAD_TO_DEG = 180 / Math.PI
-const MAX_CALIBRATION_ATTEMPTS = 2
+// A failed attempt is now a real signal (see attitude.ts's loosened thresholds), not routine noise
+// eaten by a too-short probe window — worth a few more retries before giving up and silently
+// disengaging, since each attempt is cheap relative to how disruptive a silent disengage is.
+const MAX_CALIBRATION_ATTEMPTS = 4
 const TIMING_SMOOTHING = 0.2
 const ALIGNMENT_TOLERANCE_DEG = 25 // safety gate during burning: cut the main engine if drift ever exceeds this mid-burn
 // Cruise-speed governor for "burning": rather than a flat cap (which made a 260,000km orbit
@@ -28,12 +31,12 @@ const ALIGNMENT_TOLERANCE_DEG = 25 // safety gate during burning: cut the main e
 // only fires while accelerating/braking, see the speedError check below), 1000 m/s round-tripped
 // fine fuel-wise in live testing on this ship's loadout — keep it here rather than a lower,
 // more conservative estimate.
-const MAX_CRUISE_SPEED = 1000 // m/s
+const DEFAULT_MAX_CRUISE_SPEED = 1000 // m/s — used unless engage() is given its own cap (see maxCruiseSpeed)
 const SPEED_GAIN = 20 // pct of thrust per m/s of speed error
 const SPEED_DEADBAND = 0.3 // m/s — inside this, don't bother thrusting
 
 // Below this closing speed, hand off from the powerful main engine to the much weaker retro
-// thruster (SteeringThruster, only ~3% of FixedThruster's power per steering_thruster.rs) for the
+// thruster (SteeringThruster, only ~3% of the main engine's power per steering_thruster.rs) for the
 // final approach to zero — "1% of the big engine" is still a coarse, quantized-feeling force step
 // on a strong thruster; the retro thruster is genuinely gentle at 100%, giving far finer control
 // right where overshoot is most likely. Requires flipping the nose back to prograde first (the
@@ -139,6 +142,10 @@ function isSettled(pointing: { angleDeg: number }, rates: AxisValues): boolean {
 }
 
 export class Autopilot {
+  // Fires only for a disengage the autopilot decided on its own (target lost, calibration
+  // failure, …) — a manual disengage (Escape/button/palette) is already visible as the status
+  // widget going away, no separate notification needed for that.
+  private failureHandler: ((reason: string) => void) | null = null
   private thrusters = classifyThrusters(null, [])
   private getTargetPosition: ((nowMs: number) => FloatingOriginPosition | null) | null = null
   private arrivalRadius = 200
@@ -152,6 +159,9 @@ export class Autopilot {
   // "Point" (context menu) engages tuning+pointing only — holds heading on the target and never
   // burns, unlike a full approach.
   private pointOnly = false
+  // Cruise-speed governor cap for "burning" (see the desiredSpeed computation below) — operator-set
+  // per approach via the command palette's "Approach" prompt, DEFAULT_MAX_CRUISE_SPEED otherwise.
+  private maxCruiseSpeed = DEFAULT_MAX_CRUISE_SPEED
   private rcsIds = ""
   private sizeM: number | null = null
   private massKg: number | null = null
@@ -241,6 +251,17 @@ export class Autopilot {
     return this.measuredAccel
   }
 
+  /** Called with a human-readable reason whenever the autopilot disengages itself, unprompted. */
+  onFailure(handler: (reason: string) => void): void {
+    this.failureHandler = handler
+  }
+
+  /** Disengage with a reason to surface (see onFailure) — for every auto-disengage that isn't the player's own action. */
+  private disengageWithReason(reason: string): void {
+    this.disengage()
+    this.failureHandler?.(reason)
+  }
+
   /** True once the ship has been continuously aligned+non-rotating for POINTING_SETTLE_MS. */
   private trackSettle(pointingNow: { angleDeg: number } | null, rates: AxisValues, nowMs: number): boolean {
     if (!pointingNow || !isSettled(pointingNow, rates)) {
@@ -310,6 +331,7 @@ export class Autopilot {
     targetRadiusM: number,
     label: string,
     pointOnly = false,
+    maxCruiseSpeed = DEFAULT_MAX_CRUISE_SPEED,
   ): void {
     this.getTargetPosition = getTargetPosition
     this.arrivalRadius = arrivalRadius
@@ -317,6 +339,7 @@ export class Autopilot {
     this.label = label
     this.stopMode = false
     this.pointOnly = pointOnly
+    this.maxCruiseSpeed = maxCruiseSpeed
     this.resetForEngage()
   }
 
@@ -411,7 +434,7 @@ export class Autopilot {
 
       const targetPosition = this.getTargetPosition!(now)
       if (!targetPosition) {
-        this.disengage()
+        this.disengageWithReason("Bersaglio perso")
         return
       }
 
@@ -476,7 +499,7 @@ export class Autopilot {
           this.startCalibration()
         } else {
           console.warn("Autopilot: RCS calibration failed, yaw/pitch did not respond consistently", gains)
-          this.disengage()
+          this.disengageWithReason("Calibrazione RCS fallita")
           return
         }
       }
@@ -534,7 +557,7 @@ export class Autopilot {
         }
 
         if (this.phase === "burning" && pointing.angleDeg < ALIGNMENT_TOLERANCE_DEG && remaining > 0) {
-          const desiredSpeed = Math.min(MAX_CRUISE_SPEED, Math.sqrt(2 * decelEstimate * remaining))
+          const desiredSpeed = Math.min(this.maxCruiseSpeed, Math.sqrt(2 * decelEstimate * remaining))
           const speedError = desiredSpeed - closingSpeed
           if (speedError > SPEED_DEADBAND) forward = Math.min(100, speedError * SPEED_GAIN)
         } else if (this.phase === "stopping") {

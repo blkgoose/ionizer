@@ -8,8 +8,24 @@ const STORAGE_KEY = "ion.autopilot"
  * without persisting the closure itself.
  */
 export type AutopilotGoal =
-  | { kind: "shipApproach"; entityId: string; arrivalRadius: number; targetRadiusM: number; label: string; pointOnly?: boolean }
-  | { kind: "bodyApproach"; entryIndex: number; arrivalRadius: number; targetRadiusM: number; label: string; pointOnly?: boolean }
+  | {
+      kind: "shipApproach"
+      entityId: string
+      arrivalRadius: number
+      targetRadiusM: number
+      label: string
+      pointOnly?: boolean
+      maxCruiseSpeedMps?: number
+    }
+  | {
+      kind: "bodyApproach"
+      entryIndex: number
+      arrivalRadius: number
+      targetRadiusM: number
+      label: string
+      pointOnly?: boolean
+      maxCruiseSpeedMps?: number
+    }
   | { kind: "orbit"; center: FloatingOriginPosition; radiusM: number; arrivalRadius: number; startedAtMs: number; label: string }
   | { kind: "stop" }
 

@@ -7,6 +7,19 @@ const MAX_DISTANCE = 20000
 const ROTATE_SPEED = 0.005
 const PAN_SPEED_AT_UNIT_DISTANCE = 0.08 // m/s of pan per meter of current zoom distance
 
+// Speed-based auto-dolly: hugs the ship close while it's stopped, backs off as it picks up speed
+// so a fast-moving ship (and the ground rushing past it) doesn't fill the whole frame.
+const AUTO_DISTANCE_BASE_M = 500
+const AUTO_DISTANCE_PER_MPS = 15
+const AUTO_DISTANCE_MAX_M = 6000
+const AUTO_DISTANCE_LERP = 2 // 1/s — smoothing rate, not an instant snap to the target distance
+
+// Auto-orient rotates yaw to a 3/4 view of the ship relative to whatever it's currently aimed at
+// (the live autopilot target), so both the ship and the point it's headed towards stay framed
+// without the player ever having to drag the view themselves.
+const AUTO_ORIENT_OFFSET_RAD = (Math.PI * 3) / 4 // 135°: behind-and-to-the-side, not dead-on-axis
+const AUTO_ORIENT_LERP = 3 // 1/s
+
 /**
  * CAD-style orbit camera for tactical mode: the camera orbits `center` at `distance` along
  * (yaw, pitch) — zoom is mouse wheel, orbit is right-mouse-drag, WASD/arrows pan `center` on the
@@ -19,7 +32,11 @@ const PAN_SPEED_AT_UNIT_DISTANCE = 0.08 // m/s of pan per meter of current zoom 
 export class TacticalCameraController {
   readonly center = new THREE.Vector3()
   private shipPosition = new THREE.Vector3()
+  private shipSpeed = 0
+  private aimPoint: THREE.Vector3 | null = null
   private following = true
+  private autoDistance = true
+  private autoOrient = true
   private distance = 2000
   private yaw = 0
   private pitch = 0.6
@@ -30,6 +47,7 @@ export class TacticalCameraController {
 
   private readonly onWheel = (e: WheelEvent): void => {
     e.preventDefault()
+    this.autoDistance = false
     this.distance *= e.deltaY > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR
     this.distance = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, this.distance))
   }
@@ -49,6 +67,7 @@ export class TacticalCameraController {
     const dy = e.clientY - this.lastY
     this.lastX = e.clientX
     this.lastY = e.clientY
+    this.autoOrient = false
     this.yaw -= dx * ROTATE_SPEED
     this.pitch = Math.max(-1.5, Math.min(1.5, this.pitch - dy * ROTATE_SPEED))
   }
@@ -100,19 +119,48 @@ export class TacticalCameraController {
     if (this.following) this.center.copy(this.shipPosition)
   }
 
-  /** Snaps the orbit center back onto the ship and resumes auto-follow (Space). */
+  /** Called every ship-state poll with the ship's current speed (m/s), driving the auto-dolly (see AUTO_DISTANCE_*). */
+  setShipSpeed(speedMps: number): void {
+    this.shipSpeed = speedMps
+  }
+
+  /** Called every ship-state poll with the live autopilot target (world space), or null when idle — drives auto-orient. */
+  setAimPoint(point: THREE.Vector3 | null): void {
+    this.aimPoint = point
+  }
+
+  /** Snaps the orbit center back onto the ship and resumes auto-follow/auto-dolly/auto-orient (Space). */
   recenter(): void {
     this.center.copy(this.shipPosition)
     this.following = true
+    this.autoDistance = true
+    this.autoOrient = true
   }
 
-  /** Called every render frame; dtSeconds drives the WASD/arrow pan speed. */
+  /** Called every render frame; dtSeconds drives the WASD/arrow pan speed and the auto-dolly/auto-orient smoothing. */
   update(dtSeconds: number): void {
     const panAmount = PAN_SPEED_AT_UNIT_DISTANCE * this.distance * dtSeconds
     if (this.keyDown.up) this.center.y += panAmount
     if (this.keyDown.down) this.center.y -= panAmount
     if (this.keyDown.left) this.center.x -= panAmount
     if (this.keyDown.right) this.center.x += panAmount
+
+    if (this.autoDistance) {
+      const desiredDistance = Math.min(AUTO_DISTANCE_MAX_M, AUTO_DISTANCE_BASE_M + this.shipSpeed * AUTO_DISTANCE_PER_MPS)
+      this.distance += (desiredDistance - this.distance) * Math.min(1, AUTO_DISTANCE_LERP * dtSeconds)
+    }
+
+    if (this.autoOrient && this.aimPoint) {
+      const dx = this.aimPoint.x - this.center.x
+      const dz = this.aimPoint.z - this.center.z
+      if (dx * dx + dz * dz > 1e-6) {
+        const targetYaw = Math.atan2(dx, dz)
+        const desiredYaw = targetYaw + AUTO_ORIENT_OFFSET_RAD
+        // Shortest-path angle diff so the yaw doesn't unwind the long way around at the ±π wrap.
+        const diff = Math.atan2(Math.sin(desiredYaw - this.yaw), Math.cos(desiredYaw - this.yaw))
+        this.yaw += diff * Math.min(1, AUTO_ORIENT_LERP * dtSeconds)
+      }
+    }
 
     const offset = new THREE.Vector3(
       Math.cos(this.pitch) * Math.sin(this.yaw),

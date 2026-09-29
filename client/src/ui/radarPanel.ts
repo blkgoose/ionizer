@@ -1,7 +1,7 @@
 import type { FloatingOriginPosition, RadarContactEntry } from "../api/types"
 import { relativeVector } from "../state/shipState"
 
-export type RadarPanelSelectHandler = (entityId: string, clientX: number, clientY: number) => void
+export type RadarPanelSelectHandler = (entityId: string) => void
 
 export class RadarPanel {
   private el: HTMLDivElement
@@ -13,9 +13,9 @@ export class RadarPanel {
   private rows = new Map<string, HTMLLIElement>()
 
   /**
-   * `onSelect`, if given, makes each row clickable — an alternate way to open the same context
-   * menu (target/approach/point/orbit) a 3D-view contact click would, for contacts that are tiny
-   * or off-screen.
+   * `onSelect`, if given, makes each row clickable — an alternate way to open the same command
+   * palette actions (target/approach/point/orbit) a 3D-view contact click would, for contacts
+   * that are tiny or off-screen.
    */
   constructor(container: HTMLElement, onSelect?: RadarPanelSelectHandler) {
     this.el = document.createElement("div")
@@ -32,10 +32,7 @@ export class RadarPanel {
       if (!this.onSelect) return
       const li = (event.target as HTMLElement).closest<HTMLLIElement>("li[data-entity-id]")
       if (!li) return
-      // Otherwise the click reaches ContextMenu's own window-level dismiss listener right after
-      // onSelect opens the menu, hiding it immediately.
-      event.stopPropagation()
-      this.onSelect(li.dataset.entityId!, event.clientX, event.clientY)
+      this.onSelect(li.dataset.entityId!)
     })
   }
 

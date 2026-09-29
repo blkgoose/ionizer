@@ -1,7 +1,7 @@
 import * as THREE from "three"
 import "./style.css"
 import { ionClient } from "./api/client"
-import { RADAR_TYPES, SYSTEM_MAP_TYPES } from "./api/modules"
+import { RADAR_TYPES, SYSTEM_MAP_TYPES, TAB_LABELS, tabForModuleType } from "./api/modules"
 import { renderLogin } from "./ui/login"
 import { Hud } from "./ui/hud"
 import { ModulesModal } from "./ui/modulesModal"
@@ -11,9 +11,9 @@ import { RadarPanel } from "./ui/radarPanel"
 import { OrientationPanel } from "./ui/orientationPanel"
 import { DirectionMarkers } from "./ui/directionMarkers"
 import { FpsCounter } from "./ui/fpsCounter"
-import { ContextMenu } from "./ui/contextMenu"
-import { PointPicker, type PointPickerEntry } from "./ui/pointPicker"
+import { CommandPalette, type PaletteItem, type PaletteNode } from "./ui/commandPalette"
 import { AutopilotStatus } from "./ui/autopilotStatus"
+import { Notifications } from "./ui/notifications"
 import { FlightScene } from "./scene/scene"
 import { Starfield } from "./scene/starfield"
 import { IntelligentPropulsion } from "./scene/propulsion"
@@ -29,6 +29,7 @@ import {
   readEngineActivations,
   readFuelLevels,
   readShipSize,
+  readVelocity,
   relativeVector,
   type ModuleRef,
 } from "./state/shipState"
@@ -41,6 +42,13 @@ import { loadAutopilotPhase } from "./state/autopilotPhase"
 const PROPULSION_TICK_MS = 100
 const RENDER_INTERVAL_MS = 1000 / 15
 const ARRIVAL_RADIUS_M = 200
+const DEFAULT_CRUISE_SPEED_MPS = 1000
+
+/** Parses the command palette's "Approach" cruise-speed prompt; falls back to the default on blank/invalid input. */
+function parseCruiseSpeed(value: string): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CRUISE_SPEED_MPS
+}
 
 const app = document.querySelector<HTMLDivElement>("#app")!
 
@@ -61,20 +69,18 @@ function startGame(): void {
   )
   const modal = new ModulesModal(app)
   const minimap = new Minimap(app)
-  const systemPanel = new SystemPanel(app, (entryIndex, kind, clientX, clientY) => {
+  const systemPanel = new SystemPanel(app, (entryIndex, kind) => {
     const position = systemMapPoller.getLatest()[entryIndex]?.position ?? null
-    // Rows near the panel's bottom edge would push a click-positioned menu off the bottom of
-    // the viewport, so this trigger always centers the menu instead of anchoring it to the row.
-    showBodyMenu(clientX, clientY, entryIndex, kind, position, true)
+    showBodyMenu(entryIndex, kind, position)
   })
-  const radarPanel = new RadarPanel(app, (entityId, clientX, clientY) => {
-    showShipMenu(clientX, clientY, entityId, true)
+  const radarPanel = new RadarPanel(app, (entityId) => {
+    showShipMenu(entityId)
   })
   const orientationPanel = new OrientationPanel(app)
   const directionMarkers = new DirectionMarkers(app)
   const fpsCounter = new FpsCounter(app)
   const propulsion = new IntelligentPropulsion()
-  const contextMenu = new ContextMenu(app)
+  const commandPalette = new CommandPalette(app, buildCommandPaletteRoot)
 
   // Tactical mode flies exclusively via the autopilot (mouse targeting + context menu), so
   // manual keyboard thruster control stands down entirely — WASD/arrows are the camera's pan
@@ -83,18 +89,20 @@ function startGame(): void {
   const tacticalCamera = tactical ? new TacticalCameraController(scene.camera, scene.renderer.domElement) : null
 
   let currentModules: ModuleRef[] = []
+  // Tracked purely for the tactical camera's auto-orient (see below) — the autopilot itself
+  // already has its own live target via engageAutopilot()'s closure.
+  let activeGoal: AutopilotGoal | null = null
 
   function disengageAutopilot(): void {
     autopilot.disengage()
     propulsion.enabled = !tactical
     saveAutopilotGoal(null)
+    activeGoal = null
   }
 
   const autopilotStatus = new AutopilotStatus(app, disengageAutopilot)
-
-  window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && autopilot.engaged) disengageAutopilot()
-  })
+  const notifications = new Notifications(app)
+  autopilot.onFailure((reason) => notifications.show(`Autopilota disattivato: ${reason}`))
 
   if (tacticalCamera) {
     const raycaster = new THREE.Raycaster()
@@ -137,21 +145,16 @@ function startGame(): void {
     }
 
     scene.renderer.domElement.addEventListener("click", (event) => {
-      // Without this, the click bubbles up to ContextMenu's own window-level "click" listener
-      // (which exists to dismiss an already-open menu on an outside click) and immediately
-      // hides the menu this very click is about to open.
-      event.stopPropagation()
-
       const hovered = findHovered(event.clientX, event.clientY)
       if (!hovered) {
-        contextMenu.hide()
+        commandPalette.close()
         return
       }
       if (hovered.kind === "ship") {
-        showShipMenu(event.clientX, event.clientY, hovered.entityId)
+        showShipMenu(hovered.entityId)
       } else {
         const position = systemMapPoller.getLatest()[hovered.entryIndex]?.position ?? null
-        showBodyMenu(event.clientX, event.clientY, hovered.entryIndex, hovered.bodyKind, position)
+        showBodyMenu(hovered.entryIndex, hovered.bodyKind, position)
       }
     })
 
@@ -209,16 +212,24 @@ function startGame(): void {
       autopilot.engageStop()
     } else {
       const { getTarget, arrivalRadius, targetRadiusM, label } = resolveGoal(goal)
-      autopilot.engage(getTarget, arrivalRadius, targetRadiusM, label, goal.kind !== "orbit" && goal.pointOnly)
+      autopilot.engage(
+        getTarget,
+        arrivalRadius,
+        targetRadiusM,
+        label,
+        goal.kind !== "orbit" && goal.pointOnly,
+        goal.kind !== "orbit" ? goal.maxCruiseSpeedMps : undefined,
+      )
     }
     saveAutopilotGoal(goal)
+    activeGoal = goal
   }
 
   // Resumed once the relevant live position becomes available (radar/system-map poll not necessarily
   // caught up yet on the very first ship-state tick) — see the shipStatePoller.subscribe callback below.
   let pendingResume: AutopilotGoal | null = loadAutopilotGoal()
 
-  function showShipMenu(x: number, y: number, entityId: string, centered = false): void {
+  function showShipMenu(entityId: string): void {
     const turretModule = currentModules.find((m) => m.type === "Turret")
     const shipPosition = readFloatingPosition(shipStatePoller.getLatest() ?? {})
     const contact = radarPoller.getLatest().find(([id]) => id === entityId)
@@ -227,14 +238,12 @@ function startGame(): void {
     const distanceLabel =
       shipPosition && contact ? ` — ${formatDistance(Math.hypot(...relativeVector(shipPosition, contact[1])))}` : ""
     const orbitRadius = Math.max(safeOrbitRadiusM(contactRadiusM, 0, autopilot.getMeasuredAccel()), ARRIVAL_RADIUS_M)
-    contextMenu.show(
-      x,
-      y,
-      `Nave ${entityId.slice(0, 8)}${distanceLabel}`,
-      [
-        {
-          label: "Orbit",
-          onSelect: () => {
+    commandPalette.openList(`Nave ${entityId.slice(0, 8)}${distanceLabel}`, [
+      {
+        label: "Orbit",
+        node: {
+          kind: "run",
+          run: () => {
             if (!contact) return
             // Same snapshot-center limitation as a body orbit (see showBodyMenu): the chase point
             // circles where the contact was at engage time, not a live-tracked position, since a
@@ -249,23 +258,30 @@ function startGame(): void {
             })
           },
         },
-        {
-          label: "Approach",
-          onSelect: () => {
+      },
+      {
+        label: "Approach",
+        node: {
+          kind: "edit",
+          value: String(DEFAULT_CRUISE_SPEED_MPS),
+          commit: (value) =>
             engageAutopilot({
               kind: "shipApproach",
               entityId,
               arrivalRadius: ARRIVAL_RADIUS_M,
               targetRadiusM: contactRadiusM,
               label: `Approach ${entityId.slice(0, 8)}`,
-            })
-          },
+              maxCruiseSpeedMps: parseCruiseSpeed(value),
+            }),
         },
-        {
-          // Tuning + pointing only — aims the nose at the target and holds once settled, without
-          // ever engaging the main engine.
-          label: "Point",
-          onSelect: () => {
+      },
+      {
+        // Tuning + pointing only — aims the nose at the target and holds once settled, without
+        // ever engaging the main engine.
+        label: "Point",
+        node: {
+          kind: "run",
+          run: () =>
             engageAutopilot({
               kind: "shipApproach",
               entityId,
@@ -273,21 +289,17 @@ function startGame(): void {
               targetRadiusM: contactRadiusM,
               label: `Point ${entityId.slice(0, 8)}`,
               pointOnly: true,
-            })
-          },
+            }),
         },
-        {
-          label: "Target",
-          onSelect: () => {
-            if (turretModule) void ionClient.set(turretModule.module_id, "target", entityId)
-          },
-        },
-      ],
-      centered,
-    )
+      },
+      {
+        label: "Target",
+        node: { kind: "run", run: () => turretModule && void ionClient.set(turretModule.module_id, "target", entityId) },
+      },
+    ])
   }
 
-  function showBodyMenu(x: number, y: number, entryIndex: number, kind: string, position: FloatingOriginPosition | null, centered = false): void {
+  function showBodyMenu(entryIndex: number, kind: string, position: FloatingOriginPosition | null): void {
     if (!position) return
     // SystemMapEntry's diameter_m is a diameter, not a radius.
     const bodyRadiusM = (systemMapPoller.getLatest()[entryIndex]?.diameter_m ?? 0) / 2
@@ -295,14 +307,12 @@ function startGame(): void {
     const orbitRadius = Math.max(safeOrbitRadiusM(bodyRadiusM, massKg, autopilot.getMeasuredAccel()), ARRIVAL_RADIUS_M)
     const shipPosition = readFloatingPosition(shipStatePoller.getLatest() ?? {})
     const distanceLabel = shipPosition ? ` — ${formatDistance(Math.hypot(...relativeVector(shipPosition, position)))}` : ""
-    contextMenu.show(
-      x,
-      y,
-      `${kind}${distanceLabel}`,
-      [
-        {
-          label: "Orbit",
-          onSelect: () => {
+    commandPalette.openList(`${kind}${distanceLabel}`, [
+      {
+        label: "Orbit",
+        node: {
+          kind: "run",
+          run: () =>
             // The orbit chase point already sits `orbitRadius` out from the body's center, so the
             // autopilot should treat it as a bare point (radius 0), not double-count the body's own radius.
             engageAutopilot({
@@ -312,26 +322,32 @@ function startGame(): void {
               arrivalRadius: ARRIVAL_RADIUS_M,
               startedAtMs: Date.now(),
               label: `Orbit ${kind}`,
-            })
-          },
+            }),
         },
-        {
-          label: "Approach",
-          onSelect: () => {
+      },
+      {
+        label: "Approach",
+        node: {
+          kind: "edit",
+          value: String(DEFAULT_CRUISE_SPEED_MPS),
+          commit: (value) =>
             engageAutopilot({
               kind: "bodyApproach",
               entryIndex,
               arrivalRadius: ARRIVAL_RADIUS_M,
               targetRadiusM: bodyRadiusM,
               label: `Approach ${kind}`,
-            })
-          },
+              maxCruiseSpeedMps: parseCruiseSpeed(value),
+            }),
         },
-        {
-          // Tuning + pointing only — aims the nose at the target and holds once settled, without
-          // ever engaging the main engine.
-          label: "Point",
-          onSelect: () => {
+      },
+      {
+        // Tuning + pointing only — aims the nose at the target and holds once settled, without
+        // ever engaging the main engine.
+        label: "Point",
+        node: {
+          kind: "run",
+          run: () =>
             engageAutopilot({
               kind: "bodyApproach",
               entryIndex,
@@ -339,20 +355,18 @@ function startGame(): void {
               targetRadiusM: bodyRadiusM,
               label: `Point ${kind}`,
               pointOnly: true,
-            })
-          },
+            }),
         },
-      ],
-      centered,
-    )
+      },
+    ])
   }
 
-  /** Snapshot of every known point (system-map bodies + scanner contacts) for the Ctrl+K picker, sorted nearest-first. */
-  function buildPointPickerEntries(): PointPickerEntry[] {
+  /** "Naviga" group: every known point (system-map bodies + scanner contacts), nearest-first. */
+  function buildNavigationItems(): PaletteItem[] {
     const shipPosition = readFloatingPosition(shipStatePoller.getLatest() ?? {})
     if (!shipPosition) return []
 
-    const bodies: PointPickerEntry[] = systemMapPoller
+    const bodies = systemMapPoller
       .getLatest()
       .map((entry, entryIndex) => ({ entry, entryIndex }))
       .filter(({ entry }) => entry.kind === "star" || entry.kind === "planet")
@@ -363,23 +377,114 @@ function startGame(): void {
         return {
           distanceM,
           label: `${icon} ${label} — ${formatDistance(distanceM)}`,
-          onOpen: () => showBodyMenu(0, 0, entryIndex, entry.kind, entry.position, true),
+          onOpen: () => showBodyMenu(entryIndex, entry.kind, entry.position),
         }
       })
 
-    const ships: PointPickerEntry[] = radarPoller.getLatest().map(([entityId, position]) => {
+    const ships = radarPoller.getLatest().map(([entityId, position]) => {
       const distanceM = Math.hypot(...relativeVector(shipPosition, position))
       return {
         distanceM,
         label: `▲ ${entityId.slice(0, 8)} — ${formatDistance(distanceM)}`,
-        onOpen: () => showShipMenu(0, 0, entityId, true),
+        onOpen: () => showShipMenu(entityId),
       }
     })
 
-    return [...bodies, ...ships].sort((a, b) => a.distanceM - b.distanceM)
+    return [...bodies, ...ships]
+      .sort((a, b) => a.distanceM - b.distanceM)
+      .map(({ label, onOpen }) => ({ label, node: { kind: "run", run: onOpen } }) as PaletteItem)
   }
 
-  new PointPicker(app, buildPointPickerEntries)
+  function formatVariableValue(value: unknown): string {
+    if (value === null || value === undefined) return "-"
+    if (typeof value === "object") return JSON.stringify(value)
+    return String(value)
+  }
+
+  /** A module's MAN manifest as palette items: mutable variables (edit), read-only variables (info), actions (run/edit-params). */
+  /** A "component_ref" variable (e.g. a thruster's `fuelcell`) points at another module id — offer the ship's modules of the type its `constraints.component_type` names, instead of a free-text id field. */
+  function referencePickerNode(moduleId: string, variableName: string, componentType: unknown): PaletteNode {
+    return {
+      kind: "picker",
+      load: () =>
+        currentModules
+          .filter((m) => m.type === componentType)
+          .map((m) => ({
+            label: `${m.type} ${m.module_id.slice(0, 8)}`,
+            node: { kind: "run", run: () => void ionClient.set(moduleId, variableName, m.module_id) },
+          })),
+    }
+  }
+
+  async function moduleFunctionItems(moduleId: string): Promise<PaletteItem[]> {
+    const manifest = await ionClient.man(moduleId)
+    const variableItems: PaletteItem[] = manifest.variables.map((v) => {
+      if (!v.mutable) return { label: `${v.name}: ${formatVariableValue(v.value)}`, node: { kind: "info" } }
+      const label = `${v.name} — ${formatVariableValue(v.value)}`
+      if (v.type === "component_ref") {
+        return { label, node: referencePickerNode(moduleId, v.name, (v.constraints as { component_type?: unknown } | null)?.component_type) }
+      }
+      return { label, node: { kind: "edit", value: formatVariableValue(v.value), commit: (value) => ionClient.set(moduleId, v.name, value) } }
+    })
+    const actionItems: PaletteItem[] = manifest.actions.map((a) =>
+      a.params.length === 0
+        ? { label: a.name, node: { kind: "run", run: () => void ionClient.action(moduleId, a.name) } }
+        : {
+            label: `${a.name} (${a.params.map((p) => p.name).join(", ")})`,
+            node: {
+              kind: "edit",
+              value: "",
+              commit: (value) => void ionClient.action(moduleId, a.name, ...value.trim().split(/\s+/).filter(Boolean)),
+            },
+          },
+    )
+    return [...variableItems, ...actionItems]
+  }
+
+  /** One command-palette group per module type present on the ship (grouped by ModulesModal's tabs where one applies, else by the raw type — e.g. Radar/SystemMap, which aren't in any modal tab). `extraItems` are prepended (e.g. the autopilot stop command under "Spostamento"). */
+  function moduleGroupItem(label: string, modules: ModuleRef[], extraItems: PaletteItem[] = []): PaletteItem {
+    return {
+      label,
+      node: {
+        kind: "list",
+        load: async () => {
+          // A single component skips straight to its functions — no point making the player
+          // pick "the one Radar" before picking "scan".
+          if (modules.length === 1 && extraItems.length === 0) return moduleFunctionItems(modules[0].module_id)
+          const moduleItems: PaletteItem[] = modules.map((m) => ({
+            label: `${m.type} ${m.module_id.slice(0, 8)}`,
+            node: { kind: "list", load: () => moduleFunctionItems(m.module_id) },
+          }))
+          return [...extraItems, ...moduleItems]
+        },
+      },
+    }
+  }
+
+  function buildCommandPaletteRoot(): PaletteItem[] {
+    const groups = new Map<string, ModuleRef[]>()
+    for (const m of currentModules) {
+      const tab = tabForModuleType(m.type)
+      const key = tab ? TAB_LABELS[tab] : m.type
+      const list = groups.get(key) ?? []
+      list.push(m)
+      groups.set(key, list)
+    }
+
+    const propulsionLabel = TAB_LABELS.propulsion
+    const disengageNode: PaletteNode = autopilot.engaged ? { kind: "run", run: disengageAutopilot } : { kind: "info" }
+    const propulsionExtra: PaletteItem[] = [
+      { label: autopilot.engaged ? "Ferma autopilota" : "Nessuna manovra attiva", node: disengageNode },
+      { label: "Full stop", node: { kind: "run", run: () => engageAutopilot({ kind: "stop" }) } },
+    ]
+    if (!groups.has(propulsionLabel)) groups.set(propulsionLabel, [])
+
+    const moduleGroups = Array.from(groups.entries()).map(([label, modules]) =>
+      moduleGroupItem(label, modules, label === propulsionLabel ? propulsionExtra : []),
+    )
+
+    return [{ label: "Naviga", node: { kind: "list", load: buildNavigationItems } }, ...moduleGroups]
+  }
 
   systemMapPoller.start()
   radarPoller.start()
@@ -392,6 +497,17 @@ function startGame(): void {
       scene.setOrientation(readOrientation(entity))
     } else {
       tacticalCamera?.setShipPosition(readPosition(entity))
+      const velocity = readVelocity(entity)
+      if (velocity) tacticalCamera?.setShipSpeed(Math.hypot(velocity.x, velocity.y, velocity.z))
+      if (tacticalCamera) {
+        const shipPosition = readFloatingPosition(entity)
+        const target = activeGoal && activeGoal.kind !== "stop" ? resolveGoal(activeGoal).getTarget(Date.now()) : null
+        tacticalCamera.setAimPoint(
+          shipPosition && target
+            ? new THREE.Vector3(...readPosition(entity)).add(new THREE.Vector3(...relativeVector(shipPosition, target)))
+            : null,
+        )
+      }
       scene.setOwnShipTransform(readPosition(entity), readOrientation(entity))
       const size = readShipSize(entity)
       if (size !== null) scene.setOwnShipSize(size)
@@ -422,7 +538,10 @@ function startGame(): void {
     autopilotStatus.update(autopilot.engaged, autopilot.statusLabel, autopilot.statusPhase)
     // Covers auto-disengage inside autopilot.tick() (full-stop reaching zero speed, target lost,
     // calibration failure) — those don't go through disengageAutopilot()/engageAutopilot() above.
-    if (!autopilot.engaged) saveAutopilotGoal(null)
+    if (!autopilot.engaged) {
+      saveAutopilotGoal(null)
+      activeGoal = null
+    }
 
     orientationPanel.update(readOrientation(entity), readEngineActivations(entity, modules), readFuelLevels(entity, modules))
 

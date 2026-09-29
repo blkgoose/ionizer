@@ -11,8 +11,8 @@ const ACCEL_STEP = 10
  *  - Shift+A/D: roll (RcsThruster.roll)       — burst; A/D's meaning flips to roll while Shift is held
  *  - Q/E: lateral movement (SteeringThruster mounts pointing ~90/~270, .activation only) — burst
  *  - Shift+W/S: forward/reverse acceleration +/- — the one exception: a single SET per press (not
- *    held-repeat). Positive drives the FixedThruster (forward); negative drives the SteeringThruster
- *    mount pointing ~180 (retro) instead, since a FixedThruster can't push backward.
+ *    held-repeat). Positive drives the main engine (forward); negative drives the SteeringThruster
+ *    mount pointing ~180 (retro) instead, since the main engine can't push backward.
  */
 export class IntelligentPropulsion {
   private keyDown = { a: false, d: false, w: false, s: false, q: false, e: false, shift: false }

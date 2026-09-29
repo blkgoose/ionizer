@@ -297,46 +297,6 @@ canvas {
   display: none;
 }
 
-.context-menu {
-  position: fixed;
-  display: none;
-  flex-direction: column;
-  min-width: 160px;
-  background: rgba(5, 10, 10, 0.96);
-  border: 1px solid #345;
-  z-index: 200;
-  font-size: 0.8rem;
-}
-
-.context-menu-centered {
-  left: 50% !important;
-  top: 50% !important;
-  transform: translate(-50%, -50%);
-}
-
-.context-menu-title {
-  padding: 0.4rem 0.6rem;
-  color: #7ac;
-  border-bottom: 1px solid #234;
-  white-space: nowrap;
-}
-
-.context-menu button {
-  background: none;
-  border: none;
-  color: #cfcfcf;
-  text-align: left;
-  padding: 0.45rem 0.6rem;
-  font-family: monospace;
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-
-.context-menu button:hover {
-  background: #1a2a2a;
-  color: #fff;
-}
-
 .autopilot-status {
   position: fixed;
   top: 1rem;
@@ -368,6 +328,28 @@ canvas {
 
 .autopilot-status button:hover {
   background: #442020;
+}
+
+.notifications {
+  position: fixed;
+  top: 4rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 250;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-items: center;
+  pointer-events: none;
+}
+
+.notification {
+  padding: 0.4rem 0.75rem;
+  background: rgba(20, 0, 0, 0.85);
+  border: 1px solid #733;
+  color: #e88;
+  font-size: 0.75rem;
+  white-space: nowrap;
 }
 
 .modal-panel {
@@ -445,7 +427,7 @@ canvas {
   color: #666;
 }
 
-.point-picker-modal {
+.command-palette-modal {
   position: fixed;
   inset: 0;
   z-index: 150;
@@ -456,12 +438,12 @@ canvas {
   padding-top: 15vh;
 }
 
-.point-picker-modal.hidden {
+.command-palette-modal.hidden {
   display: none;
 }
 
-.point-picker-panel {
-  width: min(420px, 90vw);
+.command-palette-panel {
+  width: min(480px, 90vw);
   max-height: 60vh;
   background: #0a0a0a;
   border: 1px solid #444;
@@ -470,15 +452,26 @@ canvas {
   overflow: hidden;
 }
 
-.point-picker-panel h4 {
-  margin: 0;
-  padding: 0.6rem 0.75rem;
-  font-size: 0.8rem;
+.command-palette-breadcrumb {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
   color: #999;
   border-bottom: 1px solid #333;
 }
 
-.point-picker-list {
+.command-palette-input {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  font-size: 0.85rem;
+  background: #111;
+  color: #fff;
+  border: none;
+  border-bottom: 1px solid #333;
+  outline: none;
+}
+
+.command-palette-list {
   margin: 0;
   padding: 0;
   list-style: none;
@@ -486,22 +479,32 @@ canvas {
   font-size: 0.8rem;
 }
 
-.point-picker-list li {
+.command-palette-row {
   padding: 0.4rem 0.75rem;
   cursor: pointer;
 }
 
-.point-picker-list li:hover {
+.command-palette-row:hover {
   background: #1a1a1a;
 }
 
-.point-picker-list li.active {
+.command-palette-row.active {
   background: #1a2a2a;
   color: #fff;
   border-left: 2px solid #6cf;
 }
 
-.point-picker-empty {
+.command-palette-row.has-children::after {
+  content: " ›";
+  color: #6cf;
+}
+
+.command-palette-row.info {
+  color: #888;
+  cursor: default !important;
+}
+
+.command-palette-empty {
   padding: 0.75rem;
   color: #666;
   cursor: default !important;

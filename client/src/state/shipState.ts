@@ -97,7 +97,7 @@ export interface EngineActivation {
 
 export function readEngineActivations(entity: ShipEntity, modules: ModuleRef[]): EngineActivation[] {
   return modules
-    .filter((m) => m.type === "FixedThruster" || m.type === "SteeringThruster")
+    .filter((m) => MAIN_THRUSTER_TYPES.has(m.type) || m.type === "SteeringThruster")
     .map((m) => ({ moduleId: m.module_id, type: m.type, activation: readModuleActivation(entity, m.module_id) ?? 0 }))
 }
 
@@ -116,8 +116,12 @@ export function readFuelLevels(entity: ShipEntity, modules: ModuleRef[]): FuelLe
     .map((m) => ({ moduleId: m.module_id, fuelKg: readModuleField(entity, m.module_id, "fuel_kg") ?? 0 }))
 }
 
+// The main forward engine comes in three size classes (thruster.rs's thruster! macro) — component-
+// catalog.json confirms these are the actual `type` tags on the wire, not a single "FixedThruster".
+export const MAIN_THRUSTER_TYPES = new Set(["LightThruster", "StandardThruster", "CapitalThruster"])
+
 // SteeringThruster.yaw is the mount's fixed firing direction in the ship's local frame, degrees,
-// 0 = same as a FixedThruster (forward). Bucketing to the nearest cardinal tells us what role a
+// 0 = same as a main engine (forward). Bucketing to the nearest cardinal tells us what role a
 // given mount actually plays instead of guessing from list order. Shared by manual propulsion
 // (propulsion.ts) and the autopilot (autopilot.ts) so both agree on which thruster does what.
 const YAW_BUCKETS = [0, 90, 180, 270] as const
@@ -150,7 +154,7 @@ export function classifyThrusters(entity: ShipEntity | null, modules: ModuleRef[
 
   for (const m of modules) {
     if (m.type === "RcsThruster") groups.rcs.push(m)
-    else if (m.type === "FixedThruster") groups.fixed.push(m)
+    else if (MAIN_THRUSTER_TYPES.has(m.type)) groups.fixed.push(m)
     else if (m.type === "SteeringThruster") {
       const yaw = entity ? (readModuleField(entity, m.module_id, "yaw") ?? 0) : 0
       switch (nearestYawBucket(yaw)) {

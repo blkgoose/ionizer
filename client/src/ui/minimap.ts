@@ -8,7 +8,7 @@ import { relativeVector, type OrientationQuaternion } from "../state/shipState"
 const RADAR_RANGE_M = 10e3
 const SIZE_PX = 160
 
-// Ship-local convention (see FixedThruster/SteeringThruster): local +X is forward, local +Y is
+// Ship-local convention (see the main engine/SteeringThruster): local +X is forward, local +Y is
 // lateral (yaw 90/270 mounts). Rotating every relative position into this frame before projecting
 // means "up" on the disc is always where the ship is currently pointed, not a fixed world axis.
 function toLocalFrame(orientation: OrientationQuaternion, dx: number, dy: number, dz: number): THREE.Vector3 {

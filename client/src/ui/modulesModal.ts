@@ -4,7 +4,7 @@ import { TAB_LABELS, tabForModuleType, type ModuleTab } from "../api/modules"
 import { formatDuration, isSecondsField } from "../api/duration"
 import type { ModuleRef } from "../state/shipState"
 
-const TAB_ORDER: ModuleTab[] = ["cargo", "propulsion", "armaments", "crafting"]
+const TAB_ORDER: ModuleTab[] = ["cargo", "propulsion", "armaments", "crafting", "docking", "hull"]
 const DETAIL_REFRESH_MS = 1000
 
 export class ModulesModal {
@@ -42,7 +42,7 @@ export class ModulesModal {
         this.toggle()
       } else if (event.key === "Escape" && this.isOpen) {
         this.close()
-      } else if (this.isOpen && /^[1-4]$/.test(event.key)) {
+      } else if (this.isOpen && /^[1-6]$/.test(event.key)) {
         this.setTab(TAB_ORDER[Number(event.key) - 1])
       }
     })

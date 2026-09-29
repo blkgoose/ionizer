@@ -23,7 +23,7 @@ export function formatMass(massKg: number): string {
   return `${(massKg / EARTH_MASS_KG).toFixed(2)} M⊕`
 }
 
-export type SystemPanelSelectHandler = (entryIndex: number, kind: string, clientX: number, clientY: number) => void
+export type SystemPanelSelectHandler = (entryIndex: number, kind: string) => void
 
 export class SystemPanel {
   private el: HTMLDivElement
@@ -37,7 +37,7 @@ export class SystemPanel {
   /**
    * `onSelect`, if given, makes each row clickable — stars/planets are tiny, distant skybox dots
    * in the 3D view and genuinely hard to click there, so this is an alternate way to open the same
-   * context menu (target/approach/orbit) without hunting for the dot on screen.
+   * command palette actions (target/approach/orbit) without hunting for the dot on screen.
    */
   constructor(container: HTMLElement, onSelect?: SystemPanelSelectHandler) {
     this.el = document.createElement("div")
@@ -54,10 +54,7 @@ export class SystemPanel {
       if (!this.onSelect) return
       const li = (event.target as HTMLElement).closest<HTMLLIElement>("li[data-entry-index]")
       if (!li) return
-      // Otherwise the click reaches ContextMenu's window-level dismiss listener right after
-      // onSelect opens the menu, hiding it immediately.
-      event.stopPropagation()
-      this.onSelect(Number(li.dataset.entryIndex), li.dataset.kind ?? "", event.clientX, event.clientY)
+      this.onSelect(Number(li.dataset.entryIndex), li.dataset.kind ?? "")
     })
   }
 

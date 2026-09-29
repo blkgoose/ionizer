@@ -3,7 +3,7 @@ import type { OrientationQuaternion } from "../state/shipState"
 import { OrientationCage } from "./orientationCage"
 import { NEAR_RENDER_THRESHOLD_M } from "./starfield"
 
-// Ship-local "forward" is +X (see FixedThruster: force applied along local (1,0,0), then rotated
+// Ship-local "forward" is +X (see the main engine: force applied along local (1,0,0), then rotated
 // by body orientation) but three.js's camera looks down its local -Z by default. This fixed
 // rotation (-90 deg about Y) reconciles the two spaces before the ship's real orientation quaternion
 // is applied, so the cockpit view actually turns to match the ship's real attitude instead of

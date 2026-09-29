@@ -1,10 +1,14 @@
-export type ModuleTab = "cargo" | "propulsion" | "armaments" | "crafting"
+import { MAIN_THRUSTER_TYPES } from "../state/shipState"
+
+export type ModuleTab = "cargo" | "propulsion" | "armaments" | "crafting" | "docking" | "hull"
 
 export const TAB_LABELS: Record<ModuleTab, string> = {
   cargo: "Cargo & Storage",
-  propulsion: "Propulsione",
+  propulsion: "Spostamento",
   armaments: "Armamenti",
   crafting: "Crafting",
+  docking: "Docking",
+  hull: "Scafo",
 }
 
 const CRAFTING_TYPES = new Set([
@@ -26,9 +30,11 @@ const CRAFTING_TYPES = new Set([
   "WireWinder",
 ])
 
-const PROPULSION_TYPES = new Set(["FixedThruster", "RcsThruster", "SteeringThruster", "FuelCell"])
+const PROPULSION_TYPES = new Set([...MAIN_THRUSTER_TYPES, "RcsThruster", "SteeringThruster", "FuelCell"])
 const ARMAMENT_TYPES = new Set(["Turret", "Mine"])
 const CARGO_TYPES = new Set(["Cargo"])
+const DOCKING_TYPES = new Set(["DockingPort", "DockingController"])
+const HULL_TYPES = new Set(["LightHull", "StandardHull", "HeavyHull"])
 
 // component-catalog.json calls it "SystemMap"; a live entity from the currently-running
 // server still tags it "StarMap" (that build predates the rename in system_map.rs) — accept
@@ -41,5 +47,7 @@ export function tabForModuleType(type: string): ModuleTab | null {
   if (PROPULSION_TYPES.has(type)) return "propulsion"
   if (ARMAMENT_TYPES.has(type)) return "armaments"
   if (CRAFTING_TYPES.has(type)) return "crafting"
+  if (DOCKING_TYPES.has(type)) return "docking"
+  if (HULL_TYPES.has(type)) return "hull"
   return null
 }
